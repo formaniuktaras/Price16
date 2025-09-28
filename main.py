@@ -11,7 +11,7 @@ from itertools import islice
 APP_TITLE = "Prom Generator"
 from copy import deepcopy
 from datetime import datetime
-from typing import Optional
+from typing import Iterable, Optional
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -106,14 +106,117 @@ EXPORT_FIELDS_FILE = "export_fields.json"
 TITLE_TAGS_FILE = "title_tags_templates.json"
 FILM_TYPE_DEFAULT_LABEL = "Універсальний шаблон"
 CATEGORY_SCOPE_DEFAULT_LABEL = "Для всіх категорій"
+TEMPLATE_LANGUAGE_DEFAULT_LABEL = "За замовчуванням"
 
-EXPORT_LANGUAGE_CHOICES = [
-    ("uk", "Українська"),
-    ("ru", "Російська"),
-    ("en", "English"),
+DEFAULT_TEMPLATE_LANGUAGES = [
+    {"code": "uk", "label": "Українська"},
+    {"code": "ru", "label": "Російська"},
+    {"code": "en", "label": "English"},
 ]
 
-EXPORT_LANGUAGE_LABEL_MAP = {code: label for code, label in EXPORT_LANGUAGE_CHOICES}
+
+def _normalize_language_definitions(raw_languages):
+    normalized = []
+    seen = set()
+    if isinstance(raw_languages, (list, tuple)):
+        for item in raw_languages:
+            code = None
+            label = None
+            if isinstance(item, dict):
+                code = item.get("code") or item.get("id") or item.get("name")
+                label = item.get("label") or item.get("title") or item.get("name")
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                code, label = item[0], item[1]
+            elif isinstance(item, str):
+                code = item
+                label = item
+            if not isinstance(code, str):
+                continue
+            code = code.strip()
+            if not code or code in seen:
+                continue
+            if not isinstance(label, str):
+                label = code
+            label = label.strip()
+            if not label:
+                label = code
+            normalized.append({"code": code, "label": label})
+            seen.add(code)
+    if not normalized:
+        normalized = deepcopy(DEFAULT_TEMPLATE_LANGUAGES)
+    return normalized
+
+
+def _language_choices(languages):
+    return [(item["code"], item.get("label", item["code"])) for item in languages if item.get("code")]
+
+
+def _normalize_template_language_entry(entry, fallback_value=""):
+    if isinstance(entry, dict):
+        default_value = entry.get("default")
+        if not isinstance(default_value, str):
+            default_value = fallback_value
+        languages_block = entry.get("languages")
+        normalized_languages = {}
+        if isinstance(languages_block, dict):
+            for code, value in languages_block.items():
+                if isinstance(code, str) and isinstance(value, str):
+                    normalized_languages[code] = value
+        else:
+            for code, value in entry.items():
+                if code in {"default", "languages"}:
+                    continue
+                if isinstance(code, str) and isinstance(value, str):
+                    normalized_languages[code] = value
+        return {"default": default_value, "languages": normalized_languages}
+    if isinstance(entry, str):
+        return {"default": entry, "languages": {}}
+    return {"default": fallback_value, "languages": {}}
+
+
+def _get_language_template_value(entry, language_code, fallback_value=""):
+    if isinstance(entry, dict):
+        languages_block = entry.get("languages")
+        if isinstance(languages_block, dict):
+            value = languages_block.get(language_code)
+            if isinstance(value, str):
+                return value
+        value = entry.get(language_code)
+        if isinstance(value, str):
+            return value
+        default_value = entry.get("default")
+        if isinstance(default_value, str):
+            return default_value
+    elif isinstance(entry, str):
+        return entry
+    return fallback_value
+
+
+def _set_language_template_value(entry, language_code, value, fallback_value=""):
+    normalized = _normalize_template_language_entry(entry, fallback_value=fallback_value)
+    if isinstance(language_code, str) and language_code:
+        normalized.setdefault("languages", {})[language_code] = value
+    else:
+        normalized["default"] = value
+    return normalized
+
+
+def _rename_language_in_entry(entry, old_code: str, new_code: Optional[str]) -> bool:
+    if not isinstance(entry, dict) or not isinstance(old_code, str) or not old_code:
+        return False
+    changed = False
+    languages_block = entry.get("languages")
+    if isinstance(languages_block, dict) and old_code in languages_block:
+        value = languages_block.pop(old_code)
+        if isinstance(new_code, str) and new_code:
+            languages_block[new_code] = value
+        changed = True
+    if old_code in entry and isinstance(entry.get(old_code), str):
+        value = entry.pop(old_code)
+        if isinstance(new_code, str) and new_code:
+            entry[new_code] = value
+        changed = True
+    return changed
 
 _LANGUAGE_SUFFIX_MAP = {
     "_укр": "uk",
@@ -193,7 +296,8 @@ DEFAULT_TEMPLATES = {
         {"name": "privacy clear", "enabled": True},
         {"name": "privacy mate", "enabled": True},
         {"name": "anti-blue", "enabled": True}
-    ]
+    ],
+    "template_languages": deepcopy(DEFAULT_TEMPLATE_LANGUAGES),
 }
 
 DEFAULT_EXPORT_FIELDS = [
@@ -297,8 +401,8 @@ def get_available_export_formats():
 
 def _title_tags_block(title: str, tags: str) -> dict:
     return {
-        "title_template": title,
-        "tags_template": tags,
+        "title_template": _normalize_template_language_entry(title, fallback_value=title),
+        "tags_template": _normalize_template_language_entry(tags, fallback_value=tags),
     }
 
 def _build_title_tags_defaults(film_type_names, base_title, base_tags):
@@ -333,6 +437,7 @@ def load_templates():
     for k, v in DEFAULT_TEMPLATES.items():
         if k not in data:
             data[k] = deepcopy(v)
+    data["template_languages"] = _normalize_language_definitions(data.get("template_languages"))
     return data
 
 def save_templates(dct):
@@ -344,11 +449,17 @@ def _normalize_title_tags_block(block: dict, fallback: dict) -> dict:
         block = {}
     normalized = {}
     for key in ("title_template", "tags_template"):
-        value = block.get(key)
-        if isinstance(value, str):
-            normalized[key] = value
-        else:
-            normalized[key] = fallback.get(key, "")
+        fallback_entry = fallback.get(key, {}) if isinstance(fallback, dict) else {}
+        fallback_entry = _normalize_template_language_entry(fallback_entry)
+        normalized_entry = _normalize_template_language_entry(
+            block.get(key), fallback_value=fallback_entry.get("default", "")
+        )
+        fallback_languages = fallback_entry.get("languages", {})
+        if isinstance(fallback_languages, dict):
+            normalized_languages = normalized_entry.setdefault("languages", {})
+            for code, text in fallback_languages.items():
+                normalized_languages.setdefault(code, text)
+        normalized[key] = normalized_entry
     return normalized
 
 
@@ -440,7 +551,13 @@ def save_title_tags_templates(dct):
     with open(TITLE_TAGS_FILE, "w", encoding="utf-8") as f:
         json.dump(dct, f, ensure_ascii=False, indent=2)
 
-def resolve_title_tags(title_tags_templates: dict, templates: dict, category: Optional[str], film_type: str):
+def resolve_title_tags(
+    title_tags_templates: dict,
+    templates: dict,
+    category: Optional[str],
+    film_type: str,
+    language_codes: Optional[Iterable[str]] = None,
+):
     fallback_title = templates.get("title_template", DEFAULT_TEMPLATES["title_template"])
     fallback_tags = templates.get("tags_template", DEFAULT_TEMPLATES["tags_template"])
 
@@ -474,17 +591,39 @@ def resolve_title_tags(title_tags_templates: dict, templates: dict, category: Op
     if not isinstance(film_block, dict):
         film_block = {}
 
-    def resolve_value(key: str, default_value: str) -> str:
-        for block in (cat_film_block, cat_default, film_block, default_block):
-            if isinstance(block, dict):
-                value = block.get(key)
-                if isinstance(value, str):
-                    return value
-        return default_value
+    codes = []
+    if language_codes is not None:
+        for code in language_codes:
+            if not isinstance(code, str):
+                continue
+            stripped = code.strip()
+            if not stripped:
+                continue
+            if stripped in codes:
+                continue
+            codes.append(stripped)
+    if None not in codes:
+        codes.append(None)
 
-    title_template = resolve_value("title_template", fallback_title)
-    tags_template = resolve_value("tags_template", fallback_tags)
-    return title_template, tags_template
+    def resolve_map(key: str, default_value: str) -> dict:
+        resolved = {}
+        for code in codes:
+            value = None
+            for block in (cat_film_block, cat_default, film_block, default_block):
+                if not isinstance(block, dict):
+                    continue
+                candidate = _get_language_template_value(block.get(key), code, fallback_value=None)
+                if isinstance(candidate, str):
+                    value = candidate
+                    break
+            if value is None:
+                value = default_value
+            resolved[code] = value
+        return resolved
+
+    title_map = resolve_map("title_template", fallback_title)
+    tags_map = resolve_map("tags_template", fallback_tags)
+    return title_map, tags_map
 
 
 def load_export_fields():
@@ -1182,6 +1321,37 @@ def generate_export_rows(
     column_order = [field["field"] for field in enabled_fields]
 
     descriptions = templates.get("descriptions", {})
+    template_languages = _normalize_language_definitions(templates.get("template_languages"))
+    template_language_codes = [item.get("code") for item in template_languages if item.get("code")]
+    template_language_codes = [code for code in template_language_codes if isinstance(code, str) and code.strip()]
+    template_language_codes = [code.strip() for code in template_language_codes]
+    language_iteration = list(template_language_codes)
+    if None not in language_iteration:
+        language_iteration.append(None)
+    primary_language = template_language_codes[0] if template_language_codes else None
+
+    def _language_label(code: Optional[str]) -> str:
+        if code is None or code == "":
+            return "за замовчуванням"
+        return code
+
+    def _language_key_suffix(code: Optional[str]) -> str:
+        if code is None or code == "":
+            return "default"
+        return re.sub(r"\W+", "_", code)
+
+    def _value_for_language(values: dict) -> str:
+        if primary_language is not None:
+            primary_value = values.get(primary_language)
+            if isinstance(primary_value, str):
+                return primary_value
+        default_value = values.get(None)
+        if isinstance(default_value, str):
+            return default_value
+        for value in values.values():
+            if isinstance(value, str):
+                return value
+        return ""
 
     total_steps = len(pairs) * len(film_types)
     progress_count = 0
@@ -1202,50 +1372,112 @@ def generate_export_rows(
             film_type = f if isinstance(f, str) else str(f)
             cache_key = (cat, film_type)
             if cache_key not in title_tags_cache:
-                title_tpl_str, tags_tpl_str = resolve_title_tags(
+                title_map, tags_map = resolve_title_tags(
                     title_tags_templates,
                     templates,
                     cat,
                     film_type,
+                    template_language_codes,
                 )
-                try:
-                    title_tpl = Template(title_tpl_str)
-                    tags_tpl = Template(tags_tpl_str)
-                except TemplateError as exc:
+                compiled_map = {}
+                map_keys = set(title_map.keys()) | set(tags_map.keys())
+                for code in map_keys:
+                    title_tpl_str = title_map.get(code)
+                    tags_tpl_str = tags_map.get(code)
+                    try:
+                        title_tpl = Template(title_tpl_str or "")
+                    except TemplateError as exc:
+                        label = _language_label(code)
+                        raise ValueError(
+                            f"Помилка в шаблоні заголовку для категорії \"{cat}\", типу \"{film_type}\" і мови \"{label}\": {exc}"
+                        ) from exc
+                    try:
+                        tags_tpl = Template(tags_tpl_str or "")
+                    except TemplateError as exc:
+                        label = _language_label(code)
+                        raise ValueError(
+                            f"Помилка в шаблоні тегів для категорії \"{cat}\", типу \"{film_type}\" і мови \"{label}\": {exc}"
+                        ) from exc
+                    compiled_map[code] = (title_tpl, tags_tpl)
+                title_tags_cache[cache_key] = compiled_map
+            compiled_map = title_tags_cache[cache_key]
+
+            render_kwargs = dict(film_type=film_type, brand=brand, model=model, category=cat)
+            title_values = {}
+            tags_values = {}
+            for code in language_iteration:
+                tpl_pair = compiled_map.get(code) or compiled_map.get(None)
+                if tpl_pair is None and compiled_map:
+                    tpl_pair = next(iter(compiled_map.values()))
+                if tpl_pair is None:
                     raise ValueError(
-                        f"Помилка в шаблонах заголовку/тегів для категорії \"{cat}\" і типу \"{film_type}\": {exc}"
+                        f"Не знайдено шаблон заголовку/тегів для категорії \"{cat}\" і типу \"{film_type}\"."
+                    )
+                title_tpl, tags_tpl = tpl_pair
+                try:
+                    title_rendered = title_tpl.render(**render_kwargs)
+                except TemplateError as exc:
+                    label = _language_label(code)
+                    raise ValueError(
+                        f"Не вдалося згенерувати заголовок для категорії \"{cat}\", типу \"{film_type}\" і мови \"{label}\": {exc}"
                     ) from exc
-                title_tags_cache[cache_key] = (title_tpl, tags_tpl)
-            title_t, tags_t = title_tags_cache[cache_key]
-            try:
-                title_value = title_t.render(film_type=film_type, brand=brand, model=model, category=cat)
-                tags_value = tags_t.render(film_type=film_type, brand=brand, model=model, category=cat)
-            except TemplateError as exc:
-                raise ValueError(
-                    f"Не вдалося згенерувати заголовок або теги для категорії \"{cat}\" і типу \"{film_type}\": {exc}"
-                ) from exc
+                try:
+                    tags_rendered = tags_tpl.render(**render_kwargs)
+                except TemplateError as exc:
+                    label = _language_label(code)
+                    raise ValueError(
+                        f"Не вдалося згенерувати теги для категорії \"{cat}\", типу \"{film_type}\" і мови \"{label}\": {exc}"
+                    ) from exc
+                title_values[code] = title_rendered
+                tags_values[code] = tags_rendered
 
             desc_key = (cat, film_type)
-            desc_tpl = desc_template_cache.get(desc_key)
-            if desc_tpl is None:
-                desc_template_str = cat_desc_block.get(film_type)
-                if desc_template_str is None:
-                    desc_template_str = cat_desc_block.get("default")
-                if desc_template_str is None:
-                    desc_template_str = "Плівка для {{ brand }} {{ model }}"
-                try:
-                    desc_tpl = Template(desc_template_str)
-                except TemplateError as exc:
+            desc_compiled = desc_template_cache.get(desc_key)
+            if desc_compiled is None:
+                film_entry = cat_desc_block.get(film_type)
+                default_entry = cat_desc_block.get("default")
+                fallback_desc = "Плівка для {{ brand }} {{ model }}"
+                desc_compiled = {}
+                for code in language_iteration:
+                    template_str = None
+                    for entry in (film_entry, default_entry):
+                        if entry is None:
+                            continue
+                        candidate = _get_language_template_value(entry, code, fallback_value=None)
+                        if isinstance(candidate, str):
+                            template_str = candidate
+                            break
+                    if template_str is None:
+                        template_str = fallback_desc
+                    try:
+                        desc_compiled[code] = Template(template_str or "")
+                    except TemplateError as exc:
+                        label = _language_label(code)
+                        raise ValueError(
+                            f"Помилка в шаблоні опису для категорії \"{cat}\", типу \"{film_type}\" і мови \"{label}\": {exc}"
+                        ) from exc
+                desc_template_cache[desc_key] = desc_compiled
+            desc_values = {}
+            for code in language_iteration:
+                tpl = desc_compiled.get(code) or desc_compiled.get(None)
+                if tpl is None and desc_compiled:
+                    tpl = next(iter(desc_compiled.values()))
+                if tpl is None:
                     raise ValueError(
-                        f"Помилка в шаблоні опису для категорії \"{cat}\" і типу \"{film_type}\": {exc}"
+                        f"Не знайдено шаблон опису для категорії \"{cat}\" і типу \"{film_type}\"."
+                    )
+                try:
+                    desc_rendered = tpl.render(film_type=film_type, brand=brand, model=model, category=cat)
+                except TemplateError as exc:
+                    label = _language_label(code)
+                    raise ValueError(
+                        f"Не вдалося сформувати опис для категорії \"{cat}\", типу \"{film_type}\" і мови \"{label}\": {exc}"
                     ) from exc
-                desc_template_cache[desc_key] = desc_tpl
-            try:
-                desc_value = desc_tpl.render(film_type=film_type, brand=brand, model=model, category=cat)
-            except TemplateError as exc:
-                raise ValueError(
-                    f"Не вдалося сформувати опис для категорії \"{cat}\" і типу \"{film_type}\": {exc}"
-                ) from exc
+                desc_values[code] = desc_rendered
+
+            default_title = _value_for_language(title_values)
+            default_tags = _value_for_language(tags_values)
+            default_desc = _value_for_language(desc_values)
 
             context = {
                 "brand": brand,
@@ -1255,9 +1487,9 @@ def generate_export_rows(
                 "category": cat,
                 "category_id": cat_id,
                 "film_type": film_type,
-                "title": title_value,
-                "description": desc_value,
-                "tags": tags_value,
+                "title": default_title,
+                "description": default_desc,
+                "tags": default_tags,
                 "specs": specs,
                 "spec_items": spec_items,
                 "spec": spec_lookup,
@@ -1265,7 +1497,21 @@ def generate_export_rows(
                 "now": now_value,
                 "language": None,
                 "selected_languages": tuple(selected_language_codes),
+                "titles_localized": dict(title_values),
+                "descriptions_localized": dict(desc_values),
+                "tags_localized": dict(tags_values),
+                "available_template_languages": tuple(template_language_codes),
             }
+
+            for code, value in title_values.items():
+                suffix = _language_key_suffix(code)
+                context[f"title_{suffix}"] = value
+            for code, value in desc_values.items():
+                suffix = _language_key_suffix(code)
+                context[f"description_{suffix}"] = value
+            for code, value in tags_values.items():
+                suffix = _language_key_suffix(code)
+                context[f"tags_{suffix}"] = value
 
             row_values = []
             render_context_cache = {None: context}
@@ -1276,20 +1522,42 @@ def generate_export_rows(
                 field_languages = field.get("languages") or ()
                 if isinstance(field_languages, str):
                     field_languages = (field_languages,)
-                language_key = None
+                language_code = None
                 if field_languages and len(field_languages) == 1:
-                    language_key = field_languages[0]
-                context_for_field = render_context_cache.get(language_key)
+                    raw_code = field_languages[0]
+                    if isinstance(raw_code, str):
+                        stripped_code = raw_code.strip()
+                        language_code = stripped_code or None
+                context_for_field = render_context_cache.get(language_code)
                 if context_for_field is None:
                     context_for_field = dict(context)
-                    context_for_field["language"] = language_key
-                    render_context_cache[language_key] = context_for_field
+                    context_for_field["language"] = language_code
+                    effective_code = language_code
+                    title_for_language = title_values.get(effective_code)
+                    if title_for_language is None and effective_code is not None:
+                        title_for_language = title_values.get(None)
+                    if title_for_language is None:
+                        title_for_language = default_title
+                    desc_for_language = desc_values.get(effective_code)
+                    if desc_for_language is None and effective_code is not None:
+                        desc_for_language = desc_values.get(None)
+                    if desc_for_language is None:
+                        desc_for_language = default_desc
+                    tags_for_language = tags_values.get(effective_code)
+                    if tags_for_language is None and effective_code is not None:
+                        tags_for_language = tags_values.get(None)
+                    if tags_for_language is None:
+                        tags_for_language = default_tags
+                    context_for_field["title"] = title_for_language
+                    context_for_field["description"] = desc_for_language
+                    context_for_field["tags"] = tags_for_language
+                    render_context_cache[language_code] = context_for_field
                 if tpl_str:
                     if _looks_like_formula(tpl_str):
-                        formula_context = formula_context_cache.get(language_key)
+                        formula_context = formula_context_cache.get(language_code)
                         if formula_context is None:
                             formula_context = _build_formula_context(context_for_field)
-                            formula_context_cache[language_key] = formula_context
+                            formula_context_cache[language_code] = formula_context
                         try:
                             value = FormulaEngine.evaluate(tpl_str, formula_context)
                         except FormulaError as exc:
@@ -1673,6 +1941,10 @@ class App(ctk.CTk):
         self._template_category_key_to_label = {}
         self._template_film_label_to_key = {}
         self._template_film_key_to_label = {}
+        self._template_language_label_to_code = {}
+        self._template_language_code_to_label = {}
+        self._current_template_language = None
+        self._current_language_index = None
         self._gen_tree = None
         self._gen_tree_states = {}
         self._gen_tree_meta = {}
@@ -1990,13 +2262,13 @@ class App(ctk.CTk):
 
         self.tab_catalog   = tabs.add("Каталог")
         self.tab_templates = tabs.add("Шаблони")
-        self.tab_filmtypes = tabs.add("Типи плівок")
+        self.tab_parameters = tabs.add("Параметри")
         self.tab_export    = tabs.add("Експорт")
         self.tab_generate  = tabs.add("Генерація")
 
         self._build_tab_catalog()
         self._build_tab_templates()
-        self._build_tab_filmtypes()
+        self._build_tab_parameters()
         self._build_tab_export()
         self._build_tab_generate()
 
@@ -2013,6 +2285,37 @@ class App(ctk.CTk):
         for name in self._film_type_names():
             items.append((name, name))
         return items
+
+    def _template_language_items(self):
+        items = [(TEMPLATE_LANGUAGE_DEFAULT_LABEL, None)]
+        languages = self.templates.get("template_languages", [])
+        if isinstance(languages, list):
+            seen = set()
+            for item in languages:
+                code = item.get("code") if isinstance(item, dict) else None
+                label = item.get("label") if isinstance(item, dict) else None
+                if not isinstance(code, str):
+                    continue
+                stripped = code.strip()
+                if not stripped or stripped.lower() in seen:
+                    continue
+                seen.add(stripped.lower())
+                if not isinstance(label, str) or not label.strip():
+                    label = stripped
+                items.append((label.strip(), stripped))
+        return items
+
+    def _template_language_codes(self):
+        return [code for label, code in self._template_language_items() if code]
+
+    def _language_label_for_code(self, code: str) -> str:
+        mapping = getattr(self, "_template_language_code_to_label", {})
+        if isinstance(mapping, dict) and code in mapping:
+            return mapping[code]
+        for label, value in self._template_language_items():
+            if value == code:
+                return label
+        return code
 
     def _template_category_items(self):
         names = set()
@@ -2047,8 +2350,10 @@ class App(ctk.CTk):
         self._template_film_label_to_key = {label: key for label, key in film_items}
         self._template_film_key_to_label = {key: label for label, key in film_items}
 
-        self.template_category_menu.configure(values=[label for label, _ in category_items])
-        self.template_film_menu.configure(values=[label for label, _ in film_items])
+        if hasattr(self, "template_category_menu"):
+            self.template_category_menu.configure(values=[label for label, _ in category_items])
+        if hasattr(self, "template_film_menu"):
+            self.template_film_menu.configure(values=[label for label, _ in film_items])
 
         current_cat = self._current_template_category
         if current_cat not in self._template_category_key_to_label:
@@ -2068,6 +2373,21 @@ class App(ctk.CTk):
         self.template_film_var.set(film_label)
         self.template_film_menu.set(film_label)
 
+        if hasattr(self, "template_language_menu") and hasattr(self, "template_language_var"):
+            language_items = self._template_language_items()
+            self._template_language_label_to_code = {label: code for label, code in language_items}
+            self._template_language_code_to_label = {code: label for label, code in language_items}
+            self.template_language_menu.configure(values=[label for label, _ in language_items])
+            current_lang = self._current_template_language
+            if current_lang not in self._template_language_code_to_label:
+                current_lang = language_items[0][1]
+            self._current_template_language = current_lang
+            language_label = self._template_language_code_to_label.get(current_lang, TEMPLATE_LANGUAGE_DEFAULT_LABEL)
+            self.template_language_var.set(language_label)
+            self.template_language_menu.set(language_label)
+
+        self._on_template_scope_change()
+
         if current_cat and isinstance(current_cat, str):
             self._current_desc_category = current_cat
             if hasattr(self, "desc_cat_var"):
@@ -2075,25 +2395,49 @@ class App(ctk.CTk):
 
         self._on_template_scope_change()
 
-    def _set_title_tags_block(self, category_key: Optional[str], film_key: str, title_value: str, tags_value: str):
-        block = {
-            "title_template": title_value,
-            "tags_template": tags_value,
-        }
-        if not isinstance(self.title_tags_templates.get("default"), dict):
-            self.title_tags_templates["default"] = block.copy()
+    def _set_title_tags_block(
+        self,
+        category_key: Optional[str],
+        film_key: str,
+        language_code: Optional[str],
+        title_value: str,
+        tags_value: str,
+    ):
+        fallback_block = _title_tags_block(
+            self.templates.get("title_template", DEFAULT_TEMPLATES["title_template"]),
+            self.templates.get("tags_template", DEFAULT_TEMPLATES["tags_template"]),
+        )
+
+        def _update_block(container: dict, key: str) -> None:
+            existing = container.get(key)
+            normalized = _normalize_title_tags_block(existing, fallback_block)
+            normalized["title_template"] = _set_language_template_value(
+                normalized.get("title_template"), language_code, title_value, fallback_block["title_template"].get("default", "")
+            )
+            normalized["tags_template"] = _set_language_template_value(
+                normalized.get("tags_template"), language_code, tags_value, fallback_block["tags_template"].get("default", "")
+            )
+            container[key] = normalized
+
+        root_default = self.title_tags_templates.get("default")
+        if not isinstance(root_default, dict):
+            self.title_tags_templates["default"] = deepcopy(fallback_block)
+
         if category_key:
             self._ensure_title_tags_category(category_key)
-            cat_entry = self.title_tags_templates.setdefault("by_category", {}).setdefault(category_key, {"default": {}, "by_film": {}})
+            by_category = self.title_tags_templates.setdefault("by_category", {})
+            cat_entry = by_category.setdefault(category_key, {"default": {}, "by_film": {}})
             if film_key == "default":
-                cat_entry["default"] = block
+                _update_block(cat_entry, "default")
             else:
-                cat_entry.setdefault("by_film", {})[film_key] = block
+                films = cat_entry.setdefault("by_film", {})
+                _update_block(films, film_key)
         else:
             if film_key == "default":
-                self.title_tags_templates["default"] = block
+                _update_block(self.title_tags_templates, "default")
             else:
-                self.title_tags_templates.setdefault("by_film", {})[film_key] = block
+                films = self.title_tags_templates.setdefault("by_film", {})
+                _update_block(films, film_key)
 
     def _selected_film_type_key(self) -> str:
         key = getattr(self, "_current_film_type_key", None)
@@ -2554,6 +2898,17 @@ class App(ctk.CTk):
         )
         self.template_film_menu.pack(side="left")
 
+        ctk.CTkLabel(selector, text="Мова:").pack(side="left", padx=(10, 6))
+        self.template_language_var = tk.StringVar(value="")
+        self.template_language_menu = ctk.CTkOptionMenu(
+            selector,
+            values=["—"],
+            variable=self.template_language_var,
+            width=180,
+            command=lambda _value: self._on_template_scope_change(),
+        )
+        self.template_language_menu.pack(side="left")
+
         # Ліва колонка: Заголовок і Теги
         left = ctk.CTkFrame(wrap)
         left.pack(side="left", fill="both", expand=True, padx=(0, 10), pady=5)
@@ -2594,10 +2949,12 @@ class App(ctk.CTk):
         title_value = self.title_box.get("1.0", "end").strip()
         tags_value = self.tags_box.get("1.0", "end").strip()
 
-        self._set_title_tags_block(category_key, film, title_value, tags_value)
+        language_code = self._current_template_language
+
+        self._set_title_tags_block(category_key, film, language_code, title_value, tags_value)
         save_title_tags_templates(self.title_tags_templates)
 
-        if category_key is None and film == "default":
+        if category_key is None and film == "default" and not language_code:
             self.templates["title_template"] = title_value
             self.templates["tags_template"] = tags_value
             save_templates(self.templates)
@@ -2610,7 +2967,28 @@ class App(ctk.CTk):
             return
         category = self._current_template_category
         film = self._selected_film_type_key()
-        title_template, tags_template = resolve_title_tags(self.title_tags_templates, self.templates, category, film)
+        language_codes = self._template_language_codes()
+        language_code = self._current_template_language
+        title_map, tags_map = resolve_title_tags(
+            self.title_tags_templates,
+            self.templates,
+            category,
+            film,
+            language_codes,
+        )
+
+        def _pick(values: dict) -> str:
+            if isinstance(language_code, str) and language_code in values:
+                return values.get(language_code) or ""
+            if None in values:
+                return values.get(None) or ""
+            for value in values.values():
+                if isinstance(value, str):
+                    return value
+            return ""
+
+        title_template = _pick(title_map)
+        tags_template = _pick(tags_map)
         self.title_box.delete("1.0", "end")
         self.title_box.insert("1.0", title_template)
         self.tags_box.delete("1.0", "end")
@@ -2625,8 +3003,14 @@ class App(ctk.CTk):
         film_key = self._template_film_label_to_key.get(film_label, "default")
         if not film_key:
             film_key = "default"
+        language_label = None
+        language_code = None
+        if hasattr(self, "template_language_var"):
+            language_label = self.template_language_var.get()
+            language_code = self._template_language_label_to_code.get(language_label)
         self._current_template_category = category_key
         self._current_film_type_key = film_key
+        self._current_template_language = language_code
         if category_key and hasattr(self, "desc_cat_var"):
             self._current_desc_category = category_key
             self.desc_cat_var.set(category_key)
@@ -2653,15 +3037,39 @@ class App(ctk.CTk):
         if hasattr(self, "desc_cat_var"):
             self.desc_cat_var.set(category)
         self._current_desc_category = category
-        descs = self.templates.get("descriptions", {}).get(category, {})
-        if film == "default":
-            txt = descs.get("default", "")
-        else:
-            txt = descs.get(film)
-            if txt is None:
-                txt = descs.get("default", "")
+        descs_by_category = self.templates.get("descriptions", {})
+        if not isinstance(descs_by_category, dict):
+            descs_by_category = {}
+            self.templates["descriptions"] = descs_by_category
+        descs = descs_by_category.setdefault(category, {})
+        if not isinstance(descs, dict):
+            descs = {}
+            descs_by_category[category] = descs
+        target_key = film if film != "default" else "default"
+        raw_entry = descs.get(target_key)
+        fallback_entry = descs.get("default") if target_key != "default" else None
+        language_code = self._current_template_language
+        changed = False
+
+        def _resolve_entry(entry, key=None):
+            nonlocal changed
+            if isinstance(entry, dict):
+                normalized = _normalize_template_language_entry(entry)
+                if key is not None and normalized is not entry:
+                    descs[key] = normalized
+                    changed = True
+                return _get_language_template_value(normalized, language_code, fallback_value=None)
+            if isinstance(entry, str):
+                return entry
+            return None
+
+        txt = _resolve_entry(raw_entry, key=target_key)
+        if txt is None and fallback_entry is not None:
+            txt = _resolve_entry(fallback_entry, key="default")
         if txt is None:
             txt = ""
+        if changed:
+            save_templates(self.templates)
         self.desc_box.delete("1.0", "end")
         self.desc_box.insert("1.0", txt)
 
@@ -2671,19 +3079,93 @@ class App(ctk.CTk):
             return show_error("Виберіть категорію для збереження опису.")
         film = self._selected_film_type_key()
         txt = self.desc_box.get("1.0", "end").strip()
-        self.templates.setdefault("descriptions", {}).setdefault(category, {})[film] = txt
+        language_code = self._current_template_language
+        descs_by_category = self.templates.setdefault("descriptions", {})
+        if not isinstance(descs_by_category, dict):
+            descs_by_category = {}
+            self.templates["descriptions"] = descs_by_category
+        film_map = descs_by_category.setdefault(category, {})
+        if not isinstance(film_map, dict):
+            film_map = {}
+            descs_by_category[category] = film_map
+        entry = film_map.get(film)
+        entry = _set_language_template_value(entry, language_code, txt, fallback_value="")
+        film_map[film] = entry
         save_templates(self.templates)
         show_info("Шаблон опису збережено.")
 
-    # -------- Типи плівок
-    def _build_tab_filmtypes(self):
-        wrap = ctk.CTkFrame(self.tab_filmtypes)
+    # -------- Параметри (мови + типи плівок)
+    def _build_tab_parameters(self):
+        wrap = ctk.CTkFrame(self.tab_parameters)
         wrap.pack(fill="both", expand=True, padx=10, pady=10)
+        wrap.grid_columnconfigure(0, weight=1)
         wrap.grid_columnconfigure(1, weight=1)
         wrap.grid_rowconfigure(0, weight=1)
 
-        list_frame = ctk.CTkFrame(wrap)
-        list_frame.grid(row=0, column=0, sticky="ns", padx=(0, 10))
+        # ---- Мови шаблонів
+        lang_column = ctk.CTkFrame(wrap)
+        lang_column.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        lang_column.grid_columnconfigure(0, weight=1)
+        lang_column.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(lang_column, text="Мови шаблонів").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 6))
+
+        lang_tree_wrap = ctk.CTkFrame(lang_column)
+        lang_tree_wrap.grid(row=1, column=0, sticky="nsew", padx=10)
+        lang_tree_wrap.grid_columnconfigure(0, weight=1)
+        lang_tree_wrap.grid_rowconfigure(0, weight=1)
+
+        self.language_tree = ttk.Treeview(
+            lang_tree_wrap,
+            columns=("code", "label"),
+            show="headings",
+            selectmode="browse",
+            height=8,
+        )
+        self.language_tree.heading("code", text="Код")
+        self.language_tree.heading("label", text="Назва")
+        self.language_tree.column("code", width=90, anchor="w")
+        self.language_tree.column("label", width=200, anchor="w")
+        self.language_tree.grid(row=0, column=0, sticky="nsew")
+
+        lang_scroll = ttk.Scrollbar(lang_tree_wrap, orient="vertical", command=self.language_tree.yview)
+        lang_scroll.grid(row=0, column=1, sticky="ns")
+        self.language_tree.configure(yscrollcommand=lang_scroll.set)
+        self.language_tree.bind("<<TreeviewSelect>>", self._on_language_select)
+
+        lang_btns = ctk.CTkFrame(lang_column)
+        lang_btns.grid(row=2, column=0, sticky="ew", padx=10, pady=(6, 0))
+        ctk.CTkButton(lang_btns, text="Додати", command=self._language_add).pack(side="left", padx=4)
+        ctk.CTkButton(lang_btns, text="Видалити", command=self._language_delete).pack(side="left", padx=4)
+
+        lang_detail = ctk.CTkFrame(lang_column)
+        lang_detail.grid(row=3, column=0, sticky="ew", padx=10, pady=(8, 10))
+        lang_detail.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(lang_detail, text="Код мови").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        self.language_code_var = tk.StringVar(value="")
+        self.language_code_entry = ctk.CTkEntry(lang_detail, textvariable=self.language_code_var)
+        self.language_code_entry.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        self._bind_clipboard_shortcuts(self.language_code_entry)
+
+        ctk.CTkLabel(lang_detail, text="Назва мови").grid(row=2, column=0, sticky="w", pady=(0, 4))
+        self.language_label_var = tk.StringVar(value="")
+        self.language_label_entry = ctk.CTkEntry(lang_detail, textvariable=self.language_label_var)
+        self.language_label_entry.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        self._bind_clipboard_shortcuts(self.language_label_entry)
+
+        ctk.CTkButton(lang_detail, text="Застосувати", command=self._language_apply).grid(row=4, column=0, sticky="e")
+
+        # ---- Типи плівок
+        film_wrap = ctk.CTkFrame(wrap)
+        film_wrap.grid(row=0, column=1, sticky="nsew")
+        film_wrap.grid_columnconfigure(1, weight=1)
+        film_wrap.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(film_wrap, text="Типи плівок").grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 6))
+
+        list_frame = ctk.CTkFrame(film_wrap)
+        list_frame.grid(row=1, column=0, sticky="ns", padx=(0, 10))
         list_frame.grid_rowconfigure(0, weight=1)
         list_frame.grid_columnconfigure(0, weight=1)
 
@@ -2710,8 +3192,8 @@ class App(ctk.CTk):
         ctk.CTkButton(btn_frame, text="Додати", command=self._filmtype_add).pack(side="left", padx=4)
         ctk.CTkButton(btn_frame, text="Видалити", command=self._filmtype_delete).pack(side="left", padx=4)
 
-        detail = ctk.CTkFrame(wrap)
-        detail.grid(row=0, column=1, sticky="nsew")
+        detail = ctk.CTkFrame(film_wrap)
+        detail.grid(row=1, column=1, sticky="nsew")
         detail.grid_rowconfigure(3, weight=1)
 
         ctk.CTkLabel(detail, text="Назва").pack(anchor="w", padx=10, pady=(10, 0))
@@ -2728,7 +3210,301 @@ class App(ctk.CTk):
 
         ctk.CTkButton(detail, text="Застосувати", command=self._filmtype_apply).pack(anchor="e", padx=10, pady=10)
 
+        self._refresh_language_tree(select_index=0 if self.templates.get("template_languages") else None)
         self._refresh_filmtype_tree(select_index=0 if self.templates.get("film_types") else None)
+
+    def _refresh_language_tree(self, select_index=None):
+        tree = getattr(self, "language_tree", None)
+        if tree is None:
+            return
+        raw_languages = self.templates.get("template_languages")
+        if not isinstance(raw_languages, list):
+            raw_languages = []
+        normalized = _normalize_language_definitions(raw_languages)
+        if normalized != raw_languages:
+            self.templates["template_languages"] = normalized
+            save_templates(self.templates)
+        tree.delete(*tree.get_children())
+        for idx, item in enumerate(normalized):
+            code = (item.get("code") or "").strip()
+            label = (item.get("label") or "").strip()
+            tree.insert("", "end", iid=f"lang_{idx}", values=(code, label))
+        if select_index is not None and 0 <= select_index < len(normalized):
+            iid = f"lang_{select_index}"
+            if tree.exists(iid):
+                tree.selection_set(iid)
+                tree.focus(iid)
+                tree.see(iid)
+                self._on_language_select()
+        elif not normalized:
+            self._current_language_index = None
+            if hasattr(self, "language_code_var"):
+                self.language_code_var.set("")
+            if hasattr(self, "language_label_var"):
+                self.language_label_var.set("")
+
+    def _on_language_select(self, _evt=None):
+        tree = getattr(self, "language_tree", None)
+        if tree is None:
+            return
+        sel = tree.selection()
+        if not sel:
+            self._current_language_index = None
+            if hasattr(self, "language_code_var"):
+                self.language_code_var.set("")
+            if hasattr(self, "language_label_var"):
+                self.language_label_var.set("")
+            return
+        iid = sel[0]
+        parts = iid.split("_")
+        if len(parts) != 2:
+            return
+        try:
+            idx = int(parts[1])
+        except ValueError:
+            return
+        languages = self.templates.get("template_languages", [])
+        if idx < 0 or idx >= len(languages):
+            return
+        self._current_language_index = idx
+        entry = languages[idx]
+        code = (entry.get("code") or "").strip()
+        label = (entry.get("label") or "").strip()
+        if hasattr(self, "language_code_var"):
+            self.language_code_var.set(code)
+        if hasattr(self, "language_label_var"):
+            self.language_label_var.set(label)
+
+    def _language_add(self):
+        code = simpledialog.askstring("Нова мова", "Введіть код мови (наприклад, uk):", parent=self)
+        if code is None:
+            return
+        code = code.strip()
+        if not code:
+            return show_error("Введіть код мови.")
+        languages = self.templates.setdefault("template_languages", [])
+        existing_codes = {str(item.get("code", "")).strip().lower() for item in languages}
+        if code.lower() in existing_codes:
+            return show_error("Мова з таким кодом вже існує.")
+        label = simpledialog.askstring("Нова мова", "Введіть назву мови:", initialvalue=code, parent=self)
+        if label is None:
+            return
+        label = label.strip() or code
+        languages.append({"code": code, "label": label})
+        save_templates(self.templates)
+        self._current_template_language = code
+        self._on_languages_changed()
+        self._refresh_language_tree(select_index=len(languages) - 1)
+
+    def _language_delete(self):
+        tree = getattr(self, "language_tree", None)
+        if tree is None:
+            return
+        selection = list(tree.selection())
+        if not selection:
+            return show_error("Виберіть мову для видалення.")
+        if not messagebox.askyesno("Підтвердження", "Видалити вибрану мову?"):
+            return
+        indices = []
+        for iid in selection:
+            parts = iid.split("_")
+            if len(parts) != 2:
+                continue
+            try:
+                idx = int(parts[1])
+            except ValueError:
+                continue
+            indices.append(idx)
+        indices = sorted(set(indices), reverse=True)
+        removed_codes = []
+        languages = self.templates.get("template_languages", [])
+        removed_current = False
+        for idx in indices:
+            if 0 <= idx < len(languages):
+                entry = languages.pop(idx)
+                code = (entry.get("code") or "").strip()
+                if code:
+                    removed_codes.append(code)
+                    if code == self._current_template_language:
+                        removed_current = True
+        if removed_codes:
+            save_templates(self.templates)
+            for code in removed_codes:
+                self._update_language_code_references(code, None)
+            if removed_current:
+                self._current_template_language = None
+            self._on_languages_changed()
+        self._refresh_language_tree(select_index=None)
+
+    def _language_apply(self):
+        idx = self._current_language_index
+        languages = self.templates.get("template_languages", [])
+        if idx is None or idx < 0 or idx >= len(languages):
+            return show_error("Виберіть мову для редагування.")
+        code = self.language_code_var.get().strip()
+        label = self.language_label_var.get().strip()
+        if not code:
+            return show_error("Код мови не може бути порожнім.")
+        if not label:
+            label = code
+        old_entry = languages[idx]
+        old_code = (old_entry.get("code") or "").strip()
+        if code.lower() != old_code.lower():
+            existing_codes = {str(item.get("code", "")).strip().lower() for i, item in enumerate(languages) if i != idx}
+            if code.lower() in existing_codes:
+                return show_error("Мова з таким кодом вже існує.")
+        languages[idx] = {"code": code, "label": label}
+        save_templates(self.templates)
+        if code != old_code:
+            self._update_language_code_references(old_code, code)
+        if old_code == self._current_template_language:
+            self._current_template_language = code
+        self._on_languages_changed()
+        self._refresh_language_tree(select_index=idx)
+
+    def _update_language_code_references(self, old_code: str, new_code: Optional[str]):
+        if not isinstance(old_code, str) or not old_code:
+            return
+        changed_title_tags = False
+
+        def adjust_title_block(block):
+            nonlocal changed_title_tags
+            if not isinstance(block, dict):
+                return
+            for key in ("title_template", "tags_template"):
+                entry = block.get(key)
+                if _rename_language_in_entry(entry, old_code, new_code):
+                    changed_title_tags = True
+
+        adjust_title_block(self.title_tags_templates.get("default"))
+        by_film = self.title_tags_templates.get("by_film")
+        if isinstance(by_film, dict):
+            for film_block in by_film.values():
+                adjust_title_block(film_block)
+        by_category = self.title_tags_templates.get("by_category")
+        if isinstance(by_category, dict):
+            for cat_entry in by_category.values():
+                if not isinstance(cat_entry, dict):
+                    continue
+                adjust_title_block(cat_entry.get("default"))
+                films = cat_entry.get("by_film")
+                if isinstance(films, dict):
+                    for film_block in films.values():
+                        adjust_title_block(film_block)
+
+        changed_descriptions = False
+        descriptions = self.templates.get("descriptions")
+        if isinstance(descriptions, dict):
+            for cat_key, film_map in descriptions.items():
+                if not isinstance(film_map, dict):
+                    continue
+                for film_key, entry in list(film_map.items()):
+                    if isinstance(entry, dict):
+                        normalized = _normalize_template_language_entry(entry)
+                        if normalized is not entry:
+                            film_map[film_key] = normalized
+                            entry = normalized
+                            changed_descriptions = True
+                        if _rename_language_in_entry(entry, old_code, new_code):
+                            changed_descriptions = True
+
+        changed_export_fields = False
+        for field in self.export_fields:
+            if not isinstance(field, dict):
+                continue
+            languages_value = field.get("languages")
+            if isinstance(languages_value, str):
+                if languages_value.strip() == old_code:
+                    if new_code:
+                        field["languages"] = [new_code]
+                    else:
+                        field["languages"] = []
+                    changed_export_fields = True
+            elif isinstance(languages_value, (list, tuple, set)):
+                updated_list = []
+                modified = False
+                for lang in languages_value:
+                    if not isinstance(lang, str):
+                        continue
+                    stripped = lang.strip()
+                    if stripped == old_code:
+                        if new_code:
+                            updated_list.append(new_code)
+                        modified = True
+                    else:
+                        updated_list.append(stripped)
+                if modified or len(updated_list) != len(languages_value):
+                    field["languages"] = updated_list
+                    changed_export_fields = True
+
+        if changed_title_tags:
+            save_title_tags_templates(self.title_tags_templates)
+        if changed_descriptions:
+            save_templates(self.templates)
+        if changed_export_fields:
+            save_export_fields(self.export_fields)
+
+    def _on_languages_changed(self):
+        self._refresh_template_selectors()
+        self._refresh_export_language_controls()
+        self._refresh_export_fields_tree()
+        self._refresh_language_tree()
+
+    def _refresh_export_language_controls(self):
+        self._build_export_field_language_checkboxes()
+        self._build_generate_language_checkboxes()
+        selected_index = getattr(self, "_export_selected_index", None)
+        if selected_index is not None:
+            self._load_export_field_detail(selected_index)
+
+    def _build_export_field_language_checkboxes(self):
+        frame = getattr(self, "export_field_language_checks_frame", None)
+        if frame is None:
+            return
+        for child in list(frame.winfo_children()):
+            try:
+                child.destroy()
+            except Exception:
+                pass
+        self.export_field_language_vars = {}
+        self.export_field_language_checks = []
+        language_items = self._template_language_items()
+        for label, code in language_items:
+            if not code:
+                continue
+            var = tk.BooleanVar(value=False)
+            checkbox = ctk.CTkCheckBox(frame, text=label, variable=var)
+            checkbox.pack(side="left", padx=4, pady=2)
+            self.export_field_language_vars[code] = var
+            self.export_field_language_checks.append(checkbox)
+
+    def _build_generate_language_checkboxes(self):
+        container = getattr(self, "generate_language_checks_container", None)
+        if container is None:
+            return
+        for child in list(container.winfo_children()):
+            try:
+                child.destroy()
+            except Exception:
+                pass
+        self.export_language_vars = []
+        language_items = self._template_language_items()
+        codes = [code for label, code in language_items if code]
+        if not codes:
+            hint_label = getattr(self, "generate_language_hint", None)
+            if hint_label is not None:
+                hint_label.configure(text="")
+            return
+        for code in codes:
+            label = self._language_label_for_code(code)
+            var = tk.BooleanVar(value=True)
+            checkbox = ctk.CTkCheckBox(container, text=label, variable=var)
+            checkbox.pack(side="left", padx=6, pady=2)
+            self.export_language_vars.append((code, var))
+        hint_label = getattr(self, "generate_language_hint", None)
+        if hint_label is not None:
+            hint_label.configure(text="Залиште всі позначені, щоб експортувати всі мови.")
+
 
     def _refresh_filmtype_tree(self, select_index=None):
         tree = getattr(self, "filmtype_tree", None)
@@ -2925,14 +3701,8 @@ class App(ctk.CTk):
         ctk.CTkLabel(lang_block, text="Мови поля:").pack(anchor="w", pady=(0, 4))
         lang_checks = ctk.CTkFrame(lang_block, fg_color="transparent")
         lang_checks.pack(fill="x")
-        self.export_field_language_vars = {}
-        self.export_field_language_checks = []
-        for code, label in EXPORT_LANGUAGE_CHOICES:
-            var = tk.BooleanVar(value=False)
-            checkbox = ctk.CTkCheckBox(lang_checks, text=label, variable=var)
-            checkbox.pack(side="left", padx=4, pady=2)
-            self.export_field_language_vars[code] = var
-            self.export_field_language_checks.append(checkbox)
+        self.export_field_language_checks_frame = lang_checks
+        self._build_export_field_language_checkboxes()
         self.export_language_hint_label = ctk.CTkLabel(
             lang_block,
             text="Без вибору мови поле застосовується до всіх.",
@@ -3009,7 +3779,7 @@ class App(ctk.CTk):
                     codes.append(code)
                     seen_langs.add(code)
             if codes:
-                labels = [EXPORT_LANGUAGE_LABEL_MAP.get(code, code) for code in codes]
+                labels = [self._language_label_for_code(code) for code in codes]
                 display_name = f"{name} ({', '.join(labels)})"
             status = "Так" if field.get("enabled") else "Ні"
             tree.insert("", "end", iid=f"exp_{idx}", values=(display_name, status))
@@ -3431,26 +4201,22 @@ class App(ctk.CTk):
         self._bind_clipboard_shortcuts(path_entry)
         ctk.CTkButton(path_frame, text="Обрати...", command=self._choose_folder, width=110).pack(anchor="e", padx=6, pady=(0, 4))
 
-        if EXPORT_LANGUAGE_CHOICES:
-            languages_frame = ctk.CTkFrame(right)
-            languages_frame.pack(fill="x", padx=10, pady=(4, 6))
-            ctk.CTkLabel(languages_frame, text="Мови експорту:").pack(anchor="w", padx=6, pady=(4, 2))
-            lang_checks = ctk.CTkFrame(languages_frame, fg_color="transparent")
-            lang_checks.pack(fill="x", padx=6, pady=(2, 4))
-            self.export_language_vars = []
-            for code, label in EXPORT_LANGUAGE_CHOICES:
-                var = tk.BooleanVar(value=True)
-                checkbox = ctk.CTkCheckBox(lang_checks, text=label, variable=var)
-                checkbox.pack(side="left", padx=6, pady=2)
-                self.export_language_vars.append((code, var))
-            ctk.CTkLabel(
-                languages_frame,
-                text="Залиште всі позначені, щоб експортувати всі мови.",
-                anchor="w",
-                justify="left",
-                wraplength=360,
-                font=ctk.CTkFont(size=12),
-            ).pack(fill="x", padx=6, pady=(0, 2))
+        languages_frame = ctk.CTkFrame(right)
+        languages_frame.pack(fill="x", padx=10, pady=(4, 6))
+        ctk.CTkLabel(languages_frame, text="Мови експорту:").pack(anchor="w", padx=6, pady=(4, 2))
+        lang_checks = ctk.CTkFrame(languages_frame, fg_color="transparent")
+        lang_checks.pack(fill="x", padx=6, pady=(2, 4))
+        self.generate_language_checks_container = lang_checks
+        self.generate_language_hint = ctk.CTkLabel(
+            languages_frame,
+            text="",
+            anchor="w",
+            justify="left",
+            wraplength=360,
+            font=ctk.CTkFont(size=12),
+        )
+        self.generate_language_hint.pack(fill="x", padx=6, pady=(0, 2))
+        self._build_generate_language_checkboxes()
 
         types_frame = ctk.CTkFrame(right)
         types_frame.pack(fill="both", expand=True, padx=10, pady=(4, 6))
@@ -3751,7 +4517,7 @@ class App(ctk.CTk):
 
         selected_models = sorted(self._collect_checked_model_ids())
         selected_languages = self._collect_selected_export_languages()
-        if EXPORT_LANGUAGE_CHOICES and self.export_language_vars and not selected_languages:
+        if self._template_language_codes() and self.export_language_vars and not selected_languages:
             return show_error("Оберіть хоча б одну мову експорту.")
 
         try:
@@ -3847,7 +4613,7 @@ class App(ctk.CTk):
         # вибір моделей через дерево
         selected_models = sorted(self._collect_checked_model_ids())
         selected_languages = self._collect_selected_export_languages()
-        if EXPORT_LANGUAGE_CHOICES and self.export_language_vars and not selected_languages:
+        if self._template_language_codes() and self.export_language_vars and not selected_languages:
             self._progress_reset("Очікування")
             return show_error("Оберіть хоча б одну мову експорту.")
         self._progress_message("Генерація даних...")
