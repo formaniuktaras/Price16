@@ -2059,6 +2059,48 @@ class App(ctk.CTk):
             bound_ids.add(widget_id)
             self._clipboard_bound_widgets = bound_ids
 
+    def _bind_clipboard_context_menu(self, widget) -> None:
+        target = self._resolve_clipboard_target(widget)
+        if target is None:
+            return
+
+        menu = tk.Menu(target, tearoff=False)
+        commands = (
+            ("Cut", "<<Cut>>"),
+            ("Copy", "<<Copy>>"),
+            ("Paste", "<<Paste>>"),
+            ("Select All", "<<SelectAll>>"),
+        )
+
+        for label, virtual_event in commands:
+            menu.add_command(
+                label=label,
+                command=lambda ve=virtual_event, tgt=target: tgt.event_generate(ve),
+            )
+
+        def _show_menu(event, tgt=target, ctx_menu=menu):
+            try:
+                tgt.focus_set()
+            except Exception:
+                pass
+            try:
+                ctx_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                ctx_menu.grab_release()
+            return "break"
+
+        sequences = ["<Button-3>"]
+        if sys.platform == "darwin":
+            sequences.append("<Control-Button-1>")
+
+        for sequence in sequences:
+            try:
+                target.bind(sequence, _show_menu, add="+")
+            except Exception:
+                continue
+
+        setattr(target, "_clipboard_context_menu", menu)
+
     def _handle_clipboard_shortcut(self, event, widget, virtual_event: str):
         target = self._resolve_clipboard_target(widget) or widget
         if target is None:
@@ -2917,11 +2959,13 @@ class App(ctk.CTk):
         self.title_box = ctk.CTkTextbox(left, height=80)
         self.title_box.pack(fill="x", padx=10, pady=5)
         self._bind_clipboard_shortcuts(self.title_box)
+        self._bind_clipboard_context_menu(self.title_box)
 
         ctk.CTkLabel(left, text="Шаблон тегів ({{ brand }}, {{ model }}, {{ film_type }})").pack(anchor="w", padx=10, pady=(10, 0))
         self.tags_box = ctk.CTkTextbox(left, height=110)
         self.tags_box.pack(fill="x", padx=10, pady=5)
         self._bind_clipboard_shortcuts(self.tags_box)
+        self._bind_clipboard_context_menu(self.tags_box)
 
         ctk.CTkButton(left, text="Зберегти заголовок/теги", command=self._save_title_tags).pack(anchor="e", padx=10, pady=10)
 
@@ -2933,6 +2977,7 @@ class App(ctk.CTk):
         self.desc_box = ctk.CTkTextbox(right)
         self.desc_box.pack(fill="both", expand=True, padx=10, pady=5)
         self._bind_clipboard_shortcuts(self.desc_box)
+        self._bind_clipboard_context_menu(self.desc_box)
 
         btn_row = ctk.CTkFrame(right)
         btn_row.pack(fill="x", padx=10, pady=6)
