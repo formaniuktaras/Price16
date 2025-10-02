@@ -2059,6 +2059,74 @@ class App(ctk.CTk):
             bound_ids.add(widget_id)
             self._clipboard_bound_widgets = bound_ids
 
+    def _bind_clipboard_context_menu(self, widget) -> None:
+        target = self._resolve_clipboard_target(widget)
+        if target is None:
+            return
+
+        menu = getattr(target, "_clipboard_context_menu", None)
+        if not isinstance(menu, tk.Menu):
+            menu = tk.Menu(target, tearoff=0)
+            commands = (
+                ("Cut", "<<Cut>>"),
+                ("Copy", "<<Copy>>"),
+                ("Paste", "<<Paste>>"),
+                ("Select All", "<<SelectAll>>"),
+            )
+
+            def _invoke_clipboard(virtual_event: str, fallback_target=target):
+                resolved = self._resolve_clipboard_target(self.focus_get())
+                destination = resolved or fallback_target
+                try:
+                    destination.event_generate(virtual_event)
+                except Exception:
+                    return None
+                return "break"
+
+            for label, virtual_event in commands:
+                menu.add_command(
+                    label=label,
+                    command=lambda ve=virtual_event: _invoke_clipboard(ve),
+                )
+
+            setattr(target, "_clipboard_context_menu", menu)
+
+        def _show_menu(event, ctx_menu=menu, fallback_target=target):
+            active = self._resolve_clipboard_target(event.widget) or fallback_target
+            try:
+                active.focus_set()
+            except Exception:
+                pass
+            try:
+                ctx_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                ctx_menu.grab_release()
+            return "break"
+
+        sequences = {"<Button-2>", "<Button-3>", "<Shift-F10>"}
+        if sys.platform == "darwin":
+            sequences.add("<Control-Button-1>")
+
+        def _bind_sequences(target_widget, seen_attr: str):
+            if target_widget is None:
+                return
+            seen = getattr(target_widget, seen_attr, set())
+            if not isinstance(seen, set):
+                seen = set()
+            for sequence in sequences:
+                if sequence in seen:
+                    continue
+                try:
+                    target_widget.bind(sequence, _show_menu, add="+")
+                except Exception:
+                    continue
+                seen.add(sequence)
+            setattr(target_widget, seen_attr, seen)
+
+        _bind_sequences(target, "_clipboard_context_sequences")
+        if widget is not target:
+            _bind_sequences(widget, "_clipboard_context_sequences")
+
     def _handle_clipboard_shortcut(self, event, widget, virtual_event: str):
         target = self._resolve_clipboard_target(widget) or widget
         if target is None:
@@ -2917,11 +2985,13 @@ class App(ctk.CTk):
         self.title_box = ctk.CTkTextbox(left, height=80)
         self.title_box.pack(fill="x", padx=10, pady=5)
         self._bind_clipboard_shortcuts(self.title_box)
+        self._bind_clipboard_context_menu(self.title_box)
 
         ctk.CTkLabel(left, text="Шаблон тегів ({{ brand }}, {{ model }}, {{ film_type }})").pack(anchor="w", padx=10, pady=(10, 0))
         self.tags_box = ctk.CTkTextbox(left, height=110)
         self.tags_box.pack(fill="x", padx=10, pady=5)
         self._bind_clipboard_shortcuts(self.tags_box)
+        self._bind_clipboard_context_menu(self.tags_box)
 
         ctk.CTkButton(left, text="Зберегти заголовок/теги", command=self._save_title_tags).pack(anchor="e", padx=10, pady=10)
 
@@ -2933,6 +3003,7 @@ class App(ctk.CTk):
         self.desc_box = ctk.CTkTextbox(right)
         self.desc_box.pack(fill="both", expand=True, padx=10, pady=5)
         self._bind_clipboard_shortcuts(self.desc_box)
+        self._bind_clipboard_context_menu(self.desc_box)
 
         btn_row = ctk.CTkFrame(right)
         btn_row.pack(fill="x", padx=10, pady=6)
