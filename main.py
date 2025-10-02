@@ -2064,23 +2064,37 @@ class App(ctk.CTk):
         if target is None:
             return
 
-        menu = tk.Menu(target, tearoff=False)
-        commands = (
-            ("Cut", "<<Cut>>"),
-            ("Copy", "<<Copy>>"),
-            ("Paste", "<<Paste>>"),
-            ("Select All", "<<SelectAll>>"),
-        )
-
-        for label, virtual_event in commands:
-            menu.add_command(
-                label=label,
-                command=lambda ve=virtual_event, tgt=target: tgt.event_generate(ve),
+        menu = getattr(target, "_clipboard_context_menu", None)
+        if not isinstance(menu, tk.Menu):
+            menu = tk.Menu(target, tearoff=0)
+            commands = (
+                ("Cut", "<<Cut>>"),
+                ("Copy", "<<Copy>>"),
+                ("Paste", "<<Paste>>"),
+                ("Select All", "<<SelectAll>>"),
             )
 
-        def _show_menu(event, tgt=target, ctx_menu=menu):
+            def _invoke_clipboard(virtual_event: str, fallback_target=target):
+                resolved = self._resolve_clipboard_target(self.focus_get())
+                destination = resolved or fallback_target
+                try:
+                    destination.event_generate(virtual_event)
+                except Exception:
+                    return None
+                return "break"
+
+            for label, virtual_event in commands:
+                menu.add_command(
+                    label=label,
+                    command=lambda ve=virtual_event: _invoke_clipboard(ve),
+                )
+
+            setattr(target, "_clipboard_context_menu", menu)
+
+        def _show_menu(event, ctx_menu=menu, fallback_target=target):
+            active = self._resolve_clipboard_target(event.widget) or fallback_target
             try:
-                tgt.focus_set()
+                active.focus_set()
             except Exception:
                 pass
             try:
@@ -2089,17 +2103,29 @@ class App(ctk.CTk):
                 ctx_menu.grab_release()
             return "break"
 
-        sequences = ["<Button-3>"]
+        sequences = {"<Button-2>", "<Button-3>", "<Shift-F10>"}
         if sys.platform == "darwin":
-            sequences.append("<Control-Button-1>")
+            sequences.add("<Control-Button-1>")
 
-        for sequence in sequences:
-            try:
-                target.bind(sequence, _show_menu, add="+")
-            except Exception:
-                continue
+        def _bind_sequences(target_widget, seen_attr: str):
+            if target_widget is None:
+                return
+            seen = getattr(target_widget, seen_attr, set())
+            if not isinstance(seen, set):
+                seen = set()
+            for sequence in sequences:
+                if sequence in seen:
+                    continue
+                try:
+                    target_widget.bind(sequence, _show_menu, add="+")
+                except Exception:
+                    continue
+                seen.add(sequence)
+            setattr(target_widget, seen_attr, seen)
 
-        setattr(target, "_clipboard_context_menu", menu)
+        _bind_sequences(target, "_clipboard_context_sequences")
+        if widget is not target:
+            _bind_sequences(widget, "_clipboard_context_sequences")
 
     def _handle_clipboard_shortcut(self, event, widget, virtual_event: str):
         target = self._resolve_clipboard_target(widget) or widget
