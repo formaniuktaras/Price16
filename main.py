@@ -2133,7 +2133,6 @@ class App(ctk.CTk):
         _bind_sequences(target, "_clipboard_context_sequences")
         if widget is not target:
             _bind_sequences(widget, "_clipboard_context_sequences")
-
     def _clipboard_get_selection_text(self, widget):
         if widget is None:
             return None
