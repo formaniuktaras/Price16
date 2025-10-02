@@ -2068,25 +2068,32 @@ class App(ctk.CTk):
         if not isinstance(menu, tk.Menu):
             menu = tk.Menu(target, tearoff=0)
             commands = (
-                ("Cut", "<<Cut>>"),
-                ("Copy", "<<Copy>>"),
-                ("Paste", "<<Paste>>"),
-                ("Select All", "<<SelectAll>>"),
+                ("Cut", self._clipboard_cut),
+                ("Copy", self._clipboard_copy),
+                ("Paste", self._clipboard_paste),
+                ("Select All", self._clipboard_select_all),
             )
 
-            def _invoke_clipboard(virtual_event: str, fallback_target=target):
+            def _invoke_clipboard(action, fallback_target=target):
                 resolved = self._resolve_clipboard_target(self.focus_get())
                 destination = resolved or fallback_target
+                if destination is None:
+                    return None
                 try:
-                    destination.event_generate(virtual_event)
+                    destination.focus_set()
+                except Exception:
+                    pass
+                try:
+                    if action(destination):
+                        return "break"
                 except Exception:
                     return None
-                return "break"
+                return None
 
-            for label, virtual_event in commands:
+            for label, action in commands:
                 menu.add_command(
                     label=label,
-                    command=lambda ve=virtual_event: _invoke_clipboard(ve),
+                    command=lambda fn=action: _invoke_clipboard(fn),
                 )
 
             setattr(target, "_clipboard_context_menu", menu)
@@ -2126,6 +2133,110 @@ class App(ctk.CTk):
         _bind_sequences(target, "_clipboard_context_sequences")
         if widget is not target:
             _bind_sequences(widget, "_clipboard_context_sequences")
+    def _clipboard_get_selection_text(self, widget):
+        if widget is None:
+            return None
+        try:
+            return widget.selection_get()
+        except Exception:
+            pass
+        try:
+            start = widget.index("sel.first")
+            end = widget.index("sel.last")
+            return widget.get(start, end)
+        except Exception:
+            return None
+
+    def _clipboard_delete_selection(self, widget) -> bool:
+        if widget is None:
+            return False
+        try:
+            start = widget.index("sel.first")
+            end = widget.index("sel.last")
+        except Exception:
+            return False
+        try:
+            widget.delete(start, end)
+        except Exception:
+            return False
+        return True
+
+    def _clipboard_copy(self, widget) -> bool:
+        if widget is None:
+            return False
+        try:
+            widget.event_generate("<<Copy>>")
+            return True
+        except Exception:
+            pass
+        text = self._clipboard_get_selection_text(widget)
+        if text is None:
+            return False
+        try:
+            widget.clipboard_clear()
+            widget.clipboard_append(text)
+        except Exception:
+            return False
+        return True
+
+    def _clipboard_cut(self, widget) -> bool:
+        if widget is None:
+            return False
+        try:
+            widget.event_generate("<<Cut>>")
+            return True
+        except Exception:
+            pass
+        text = self._clipboard_get_selection_text(widget)
+        if text is None:
+            return False
+        try:
+            widget.clipboard_clear()
+            widget.clipboard_append(text)
+        except Exception:
+            return False
+        return self._clipboard_delete_selection(widget)
+
+    def _clipboard_paste(self, widget) -> bool:
+        if widget is None:
+            return False
+        try:
+            widget.event_generate("<<Paste>>")
+            return True
+        except Exception:
+            pass
+        try:
+            data = widget.clipboard_get()
+        except Exception:
+            return False
+        if data is None:
+            data = ""
+        self._clipboard_delete_selection(widget)
+        try:
+            widget.insert(tk.INSERT, data)
+        except Exception:
+            return False
+        return True
+
+    def _clipboard_select_all(self, widget) -> bool:
+        if widget is None:
+            return False
+        try:
+            widget.event_generate("<<SelectAll>>")
+            return True
+        except Exception:
+            pass
+        try:
+            if isinstance(widget, tk.Entry):
+                widget.select_range(0, tk.END)
+                widget.icursor(tk.END)
+            else:
+                widget.tag_add("sel", "1.0", "end-1c")
+                widget.mark_set("insert", "end-1c")
+                widget.see("insert")
+        except Exception:
+            return False
+        return True
 
     def _handle_clipboard_shortcut(self, event, widget, virtual_event: str):
         target = self._resolve_clipboard_target(widget) or widget
