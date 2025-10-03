@@ -32,6 +32,8 @@ from templates_service import (
     _normalize_language_definitions,
     _normalize_export_field_languages,
     _looks_like_formula,
+    _copy_default_export_fields,
+    _row_to_values,
     Template,
     TemplateError,
 )
