@@ -31,6 +31,8 @@ from templates_service import (
     _show_dependency_error,
     _normalize_language_definitions,
     _looks_like_formula,
+    Template,
+    TemplateError,
 )
 
 from database import (
@@ -51,6 +53,8 @@ from database import (
     rename_model,
     update_spec,
 )
+
+from formula_engine import FormulaEngine, FormulaError
 
 try:
     import customtkinter as ctk
