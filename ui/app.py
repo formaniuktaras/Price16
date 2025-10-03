@@ -29,6 +29,7 @@ from templates_service import (
     save_templates,
     save_title_tags_templates,
     _show_dependency_error,
+    _normalize_language_definitions,
 )
 
 from database import (
