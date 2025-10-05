@@ -1,5 +1,6 @@
 import sys
 import types
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,23 @@ class _Widget:
 class _CTkFont:
     def __init__(self, *args, **kwargs):
         pass
+
+
+class DummyTextBox:
+    def __init__(self, text=""):
+        self.text = text
+
+    def get(self, *args, **kwargs):
+        return self.text
+
+    def delete(self, *args, **kwargs):
+        self.text = ""
+
+    def insert(self, *args, text, **kwargs):
+        self.text = text
+
+    def configure(self, *args, **kwargs):
+        return None
 
 
 ctk_stub = types.ModuleType("customtkinter")
@@ -85,22 +103,47 @@ def prepared_app(monkeypatch, tmp_path):
     app._progress_message = lambda *args, **kwargs: None
     app._progress_update = lambda *args, **kwargs: None
     app._progress_finish = lambda *args, **kwargs: None
-    app._save_title_tags = lambda *args, **kwargs: None
     app._export_apply_detail = lambda *args, **kwargs: None
 
-    app.ft_vars = [("TypeA", types.SimpleNamespace(get=lambda: True))]
-    app.templates = {"film_types": [{"name": "TypeA", "enabled": True}]}
+    app.ft_vars = [("TypeA", DummyVar(True))]
+    app.templates = {
+        "film_types": [{"name": "TypeA", "enabled": True}],
+        "title_template": "Base title",
+        "tags_template": "Base tags",
+        "descriptions": {},
+    }
     app.title_tags_templates = {}
     app.export_fields = []
     app.export_language_vars = []
     app._collect_checked_model_ids = types.MethodType(lambda self: [], app)
     app._collect_selected_export_languages = types.MethodType(lambda self: [], app)
     app._template_language_codes = types.MethodType(lambda self: [], app)
+    app._current_template_category = None
+    app._current_template_language = None
+    app._current_film_type_key = "default"
+    app.title_box = DummyTextBox("New title")
+    app.tags_box = DummyTextBox("New tags")
+    app.desc_box = DummyTextBox("Description text")
+    app.desc_cat_var = DummyVar("")
+
+    saved_templates = []
+    saved_title_tags = []
+
+    def record_templates(data):
+        saved_templates.append(deepcopy(data))
+
+    def record_title_tags(data):
+        saved_title_tags.append(deepcopy(data))
+
+    monkeypatch.setattr(app_module, "save_templates", record_templates)
+    monkeypatch.setattr(app_module, "save_title_tags_templates", record_title_tags)
+
+    app._saved_templates = saved_templates
+    app._saved_title_tags = saved_title_tags
 
     app.export_fmt_var = DummyVar(EXCEL_FORMAT_LABEL)
     app.out_folder_var = DummyVar(str(tmp_path))
 
-    monkeypatch.setattr(app_module, "save_templates", lambda templates: None)
     monkeypatch.setattr(
         app_module,
         "generate_export_rows",
@@ -148,3 +191,40 @@ def test_generate_unexpected_exception_uses_fallback(monkeypatch, prepared_app):
     prepared_app._generate()
 
     assert messages == ["Не вдалося зберегти файли: boom"]
+
+
+def test_save_title_tags_records_defaults(monkeypatch, prepared_app):
+    prepared_app._current_template_category = None
+    prepared_app._current_template_language = None
+    prepared_app.title_box.text = "Custom title"
+    prepared_app.tags_box.text = "Custom tags"
+
+    messages = []
+    monkeypatch.setattr(app_module, "show_info", lambda message: messages.append(message))
+
+    prepared_app._save_title_tags()
+
+    assert prepared_app._saved_title_tags, "Title tags should be persisted"
+    saved_block = prepared_app._saved_title_tags[-1]["default"]
+    assert saved_block["title_template"]["default"] == "Custom title"
+    assert saved_block["tags_template"]["default"] == "Custom tags"
+    assert messages == ["Шаблони заголовку та тегів збережено."]
+    assert prepared_app._saved_templates[-1]["title_template"] == "Custom title"
+    assert prepared_app._saved_templates[-1]["tags_template"] == "Custom tags"
+
+
+def test_save_desc_template_saves_language_entry(monkeypatch, prepared_app):
+    prepared_app._current_template_category = "Категорія"
+    prepared_app._current_template_language = "en"
+    prepared_app.desc_box.text = "English description"
+    prepared_app._current_film_type_key = "default"
+
+    messages = []
+    monkeypatch.setattr(app_module, "show_info", lambda message: messages.append(message))
+
+    prepared_app._save_desc_template()
+
+    assert prepared_app._saved_templates, "Templates should be saved"
+    descriptions = prepared_app._saved_templates[-1]["descriptions"]
+    assert descriptions["Категорія"]["default"]["languages"]["en"] == "English description"
+    assert messages == ["Шаблон опису збережено."]
