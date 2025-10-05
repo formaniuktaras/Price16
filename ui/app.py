@@ -6,6 +6,7 @@ import os
 import sys
 import time
 import re
+from copy import deepcopy
 from itertools import islice
 from typing import Optional
 
@@ -30,9 +31,12 @@ from templates_service import (
     save_export_fields,
     save_templates,
     save_title_tags_templates,
+    _title_tags_block,
     _show_dependency_error,
     _normalize_language_definitions,
     _normalize_export_field_languages,
+    _normalize_title_tags_block,
+    _set_language_template_value,
     _looks_like_formula,
     _copy_default_export_fields,
     _row_to_values,
