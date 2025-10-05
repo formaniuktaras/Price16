@@ -68,6 +68,25 @@ else:
 
 OPENPYXL_AVAILABLE = Workbook is not None
 
+
+class ExportError(RuntimeError):
+    """Custom exception describing export failures."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+    def __str__(self):  # pragma: no cover - mirrors base behaviour
+        return self.message
+
+
+EXPORT_ERR_NO_OPENPYXL = "NO_OPENPYXL"
+EXPORT_ERR_FOLDER_PREP = "FOLDER_PREP_FAILED"
+EXPORT_ERR_PERMISSION = "PERMISSION_DENIED"
+EXPORT_ERR_OS_ERROR = "OS_ERROR"
+EXPORT_ERR_UNKNOWN_FORMAT = "UNKNOWN_FORMAT"
+
 if EXCEL_EXPORT_BLOCKED_MESSAGE:
     detail_suffix = (
         f"\nДеталі: {OPENPYXL_IMPORT_ERROR_DETAIL}" if OPENPYXL_IMPORT_ERROR_DETAIL else ""
@@ -1264,7 +1283,11 @@ def _make_unique_column_keys(columns):
 
 def ensure_folder(path: str):
     if path and not os.path.exists(path):
-        os.makedirs(path, exist_ok=True)
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError as exc:
+            message = f"Не вдалося підготувати теку для експорту: {exc}"
+            raise ExportError(EXPORT_ERR_FOLDER_PREP, message) from exc
 
 
 def export_products(records: list, columns: list, fmt: str, folder: str):
@@ -1279,7 +1302,7 @@ def export_products(records: list, columns: list, fmt: str, folder: str):
             if detail and detail not in message:
                 message = f"{message} (деталі: {detail})"
             message = f"{message}\n{OPENPYXL_INSTALL_HINT}{CSV_JSON_FALLBACK_NOTE}"
-            raise RuntimeError(message)
+            raise ExportError(EXPORT_ERR_NO_OPENPYXL, message)
 
         out_products = base + ".xlsx"
         workbook = Workbook()
@@ -1299,10 +1322,10 @@ def export_products(records: list, columns: list, fmt: str, folder: str):
             message = (
                 "Не вдалося зберегти Excel-файл: доступ заборонено. Закрийте файл, якщо він відкритий, та спробуйте знову."
             )
-            raise RuntimeError(message) from exc
+            raise ExportError(EXPORT_ERR_PERMISSION, message) from exc
         except OSError as exc:  # pragma: no cover - defensive
             message = f"Не вдалося зберегти Excel-файл: {exc}"
-            raise RuntimeError(message) from exc
+            raise ExportError(EXPORT_ERR_OS_ERROR, message) from exc
         finally:
             try:
                 workbook.close()
@@ -1310,13 +1333,22 @@ def export_products(records: list, columns: list, fmt: str, folder: str):
                 pass
     elif fmt == CSV_FORMAT_LABEL:
         out_products = base + ".csv"
-        with open(out_products, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.writer(f)
-            if columns:
-                writer.writerow(columns)
-            for record in records:
-                row = _row_to_values(record, columns)
-                writer.writerow(row)
+        try:
+            with open(out_products, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                if columns:
+                    writer.writerow(columns)
+                for record in records:
+                    row = _row_to_values(record, columns)
+                    writer.writerow(row)
+        except PermissionError as exc:
+            message = (
+                "Не вдалося зберегти CSV-файл: доступ заборонено. Закрийте файл, якщо він відкритий, та спробуйте знову."
+            )
+            raise ExportError(EXPORT_ERR_PERMISSION, message) from exc
+        except OSError as exc:
+            message = f"Не вдалося зберегти CSV-файл: {exc}"
+            raise ExportError(EXPORT_ERR_OS_ERROR, message) from exc
     elif fmt == JSON_FORMAT_LABEL:
         out_products = base + ".json"
         json_records = []
@@ -1324,9 +1356,19 @@ def export_products(records: list, columns: list, fmt: str, folder: str):
         for record in records:
             values = _row_to_values(record, columns)
             json_records.append({key: value for key, value in zip(json_columns, values)})
-        with open(out_products, "w", encoding="utf-8") as f:
-            json.dump(json_records, f, ensure_ascii=False, indent=2)
+        try:
+            with open(out_products, "w", encoding="utf-8") as f:
+                json.dump(json_records, f, ensure_ascii=False, indent=2)
+        except PermissionError as exc:
+            message = (
+                "Не вдалося зберегти JSON-файл: доступ заборонено. Закрийте файл, якщо він відкритий, та спробуйте знову."
+            )
+            raise ExportError(EXPORT_ERR_PERMISSION, message) from exc
+        except OSError as exc:
+            message = f"Не вдалося зберегти JSON-файл: {exc}"
+            raise ExportError(EXPORT_ERR_OS_ERROR, message) from exc
     else:
-        raise ValueError(f"Невідомий формат експорту: {fmt}")
+        message = f"Невідомий формат експорту: {fmt}"
+        raise ExportError(EXPORT_ERR_UNKNOWN_FORMAT, message)
 
     return out_products

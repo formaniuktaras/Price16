@@ -1,6 +1,7 @@
 """CustomTkinter UI application for the Prom generator."""
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import time
@@ -18,6 +19,7 @@ from templates_service import (
     DEFAULT_TEMPLATES,
     FILM_TYPE_DEFAULT_LABEL,
     TEMPLATE_LANGUAGE_DEFAULT_LABEL,
+    ExportError,
     export_products,
     generate_export_rows,
     get_available_export_formats,
@@ -58,6 +60,9 @@ from database import (
 )
 
 from formula_engine import FormulaEngine, FormulaError
+
+logger = logging.getLogger(__name__)
+
 
 try:
     import customtkinter as ctk
@@ -3274,9 +3279,13 @@ class App(ctk.CTk):
                 self.export_fmt_var.get(),
                 self.out_folder_var.get().strip(),
             )
-        except Exception as e:
+        except ExportError as exc:
             self._progress_reset("Помилка експорту")
-            return show_error(f"Не вдалося зберегти файли: {e}")
+            return show_error(f"Помилка експорту (код {exc.code}): {exc.message}")
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("Unexpected error during export")
+            self._progress_reset("Помилка експорту")
+            return show_error(f"Не вдалося зберегти файли: {exc}")
 
         self._progress_finish(f"Готово: {len(records)} рядків")
         msg = f"✅ Згенеровано {len(records)} рядків.\nФайл експорту: {products_file}"
