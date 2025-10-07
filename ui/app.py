@@ -36,6 +36,8 @@ from templates_service import (
     _normalize_language_definitions,
     _normalize_export_field_languages,
     _normalize_title_tags_block,
+    _normalize_template_language_entry,
+    _get_language_template_value,
     _set_language_template_value,
     _looks_like_formula,
     _copy_default_export_fields,
