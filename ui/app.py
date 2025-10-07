@@ -1,6 +1,7 @@
 """CustomTkinter UI application for the Prom generator."""
 from __future__ import annotations
 
+import csv
 import logging
 import os
 import sys
@@ -8,7 +9,7 @@ import time
 import re
 from copy import deepcopy
 from itertools import islice
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -66,6 +67,7 @@ from database import (
 )
 
 from formula_engine import FormulaEngine, FormulaError
+from specs_io import format_specs_for_clipboard, parse_specs_payload
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +199,37 @@ class SpecsWindow(ctk.CTkToplevel):
             command=self._delete,
         )
         self.delete_button.pack(side="left", padx=5)
+
+        bulk_ctrl = ctk.CTkFrame(self)
+        bulk_ctrl.pack(fill="x", padx=10, pady=(0, 10))
+
+        self.import_clipboard_button = ctk.CTkButton(
+            bulk_ctrl,
+            text="Імпорт з буфера",
+            command=self._import_from_clipboard,
+        )
+        self.import_clipboard_button.pack(side="left", padx=5)
+
+        self.import_file_button = ctk.CTkButton(
+            bulk_ctrl,
+            text="Імпорт з файлу",
+            command=self._import_from_file,
+        )
+        self.import_file_button.pack(side="left", padx=5)
+
+        self.export_clipboard_button = ctk.CTkButton(
+            bulk_ctrl,
+            text="Експорт у буфер",
+            command=self._export_to_clipboard,
+        )
+        self.export_clipboard_button.pack(side="left", padx=5)
+
+        self.export_file_button = ctk.CTkButton(
+            bulk_ctrl,
+            text="Експорт у файл",
+            command=self._export_to_file,
+        )
+        self.export_file_button.pack(side="left", padx=5)
 
         self._refresh()
 
@@ -442,6 +475,132 @@ class SpecsWindow(ctk.CTkToplevel):
         if button is None:
             return
         button.configure(state="normal" if enabled else "disabled")
+
+    def _collect_specs(self) -> List[Tuple[str, str]]:
+        specs: List[Tuple[str, str]] = []
+        for iid in self.tree.get_children():
+            values = self.tree.item(iid, "values")
+            if not values:
+                continue
+            key = str(values[0]).strip()
+            value = ""
+            if len(values) > 1 and values[1] is not None:
+                value = str(values[1]).strip()
+            specs.append((key, value))
+        return specs
+
+    # ------------------------------ Імпорт/експорт ---------------------------------
+
+    def _import_from_clipboard(self):
+        try:
+            raw = self.clipboard_get()
+        except tk.TclError:
+            show_error("Не вдалося прочитати буфер обміну.")
+            return
+        self._apply_import_payload(raw, source="буфера обміну")
+
+    def _import_from_file(self):
+        path = filedialog.askopenfilename(
+            title="Імпорт характеристик",
+            filetypes=(
+                ("Текстові файли", "*.txt"),
+                ("CSV/TSV", "*.csv *.tsv"),
+                ("Усі файли", "*.*"),
+            ),
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8-sig") as fh:
+                raw = fh.read()
+        except OSError as exc:
+            show_error(f"Не вдалося відкрити файл:\n{exc}")
+            return
+        self._apply_import_payload(raw, source=os.path.basename(path))
+
+    def _apply_import_payload(self, raw: str, source: str) -> None:
+        pairs = parse_specs_payload(raw)
+        if not pairs:
+            show_info("Не знайдено характеристик для імпорту.")
+            return
+        existing = {key.strip(): (sid, (value or "").strip()) for sid, key, value in get_specs(self.model_id)}
+        inserted = 0
+        updated = 0
+        skipped = 0
+        for key, value in pairs:
+            normalized_key = key.strip()
+            if not normalized_key:
+                skipped += 1
+                continue
+            normalized_value = (value or "").strip()
+            stored = existing.get(normalized_key)
+            if stored is None:
+                insert_spec(self.model_id, normalized_key, normalized_value)
+                existing[normalized_key] = (None, normalized_value)
+                inserted += 1
+                continue
+            sid, current_value = stored
+            if current_value == normalized_value:
+                skipped += 1
+                continue
+            if sid is not None:
+                update_spec(sid, normalized_key, normalized_value)
+            existing[normalized_key] = (sid, normalized_value)
+            updated += 1
+        self._refresh()
+        summary_parts = []
+        if inserted:
+            summary_parts.append(f"додано: {inserted}")
+        if updated:
+            summary_parts.append(f"оновлено: {updated}")
+        if skipped:
+            summary_parts.append(f"без змін: {skipped}")
+        if not summary_parts:
+            summary_parts.append("змін не внесено")
+        show_info(f"Імпорт завершено ({source}):\n" + ", ".join(summary_parts))
+
+    def _export_to_clipboard(self):
+        specs = self._collect_specs()
+        if not specs:
+            show_info("Немає характеристик для експорту.")
+            return
+        payload = format_specs_for_clipboard(specs)
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(payload)
+        except tk.TclError:
+            show_error("Не вдалося записати дані у буфер обміну.")
+            return
+        show_info("Характеристики скопійовано до буфера обміну.")
+
+    def _export_to_file(self):
+        specs = get_specs(self.model_id)
+        if not specs:
+            show_info("Немає характеристик для експорту.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Експорт характеристик",
+            defaultextension=".csv",
+            filetypes=(
+                ("CSV файл", "*.csv"),
+                ("TSV файл", "*.tsv"),
+                ("Текстовий файл", "*.txt"),
+                ("Усі файли", "*.*"),
+            ),
+        )
+        if not path:
+            return
+        delimiter = ";" if path.lower().endswith(".csv") else "\t"
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as fh:
+                writer = csv.writer(fh, delimiter=delimiter)
+                writer.writerow(["Назва параметра", "Значення"])
+                for _sid, key, value in specs:
+                    writer.writerow([key, value or ""])
+        except OSError as exc:
+            show_error(f"Не вдалося зберегти файл:\n{exc}")
+            return
+        show_info("Характеристики збережено у файл.")
 
 # ============================ GUI: ОСНОВНИЙ ДОДАТОК ============================
 
