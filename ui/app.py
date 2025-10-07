@@ -142,8 +142,16 @@ class SpecsWindow(ctk.CTkToplevel):
         self.geometry("700x480")
         self.resizable(True, True)
 
+        self._tree_style_name, self._tree_colors = self._init_tree_style()
+
         # Таблиця
-        self.tree = ttk.Treeview(self, columns=("key", "value"), show="headings", height=16)
+        self.tree = ttk.Treeview(
+            self,
+            columns=("key", "value"),
+            show="headings",
+            height=16,
+            style=self._tree_style_name,
+        )
         self.tree.heading("key", text="Назва параметра")
         self.tree.heading("value", text="Значення")
         self.tree.column("key", width=260, anchor="w")
@@ -155,6 +163,7 @@ class SpecsWindow(ctk.CTkToplevel):
         scroll.place(relx=1.0, rely=0.0, relheight=1.0, anchor="ne")
         self.tree.bind("<Delete>", self._on_delete_key)
         self.tree.bind("<Button-1>", self._on_tree_click, add="+")
+        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
         self._rename_click = (None, None, 0.0)
         self._rename_entry = None
@@ -176,9 +185,18 @@ class SpecsWindow(ctk.CTkToplevel):
         if callable(binder):
             binder(self.val_entry)
 
-        ctk.CTkButton(ctrl, text="Додати", command=self._add).pack(side="left", padx=5)
-        ctk.CTkButton(ctrl, text="Оновити", command=self._edit).pack(side="left", padx=5)
-        ctk.CTkButton(ctrl, text="Видалити", fg_color="#8b0000", hover_color="#a40000", command=self._delete).pack(side="left", padx=5)
+        self.add_button = ctk.CTkButton(ctrl, text="Додати", command=self._add)
+        self.add_button.pack(side="left", padx=5)
+        self.update_button = ctk.CTkButton(ctrl, text="Оновити", command=self._edit)
+        self.update_button.pack(side="left", padx=5)
+        self.delete_button = ctk.CTkButton(
+            ctrl,
+            text="Видалити",
+            fg_color="#8b0000",
+            hover_color="#a40000",
+            command=self._delete,
+        )
+        self.delete_button.pack(side="left", padx=5)
 
         self._refresh()
 
@@ -186,12 +204,84 @@ class SpecsWindow(ctk.CTkToplevel):
         self._delete()
         return "break"
 
+    def _init_tree_style(self):
+        style = ttk.Style(self)
+        style_name = "Specs.Treeview"
+        mode = (ctk.get_appearance_mode() or "light").lower()
+        if mode == "dark":
+            bg = "#1f1f1f"
+            alt_bg = "#242424"
+            fg = "#f2f2f2"
+            border = "#565b5e"
+            heading_bg = "#232323"
+            heading_fg = fg
+            hover_bg = "#303030"
+            select_bg = "#1f6aa5"
+            select_fg = "#ffffff"
+        else:
+            bg = "#ffffff"
+            alt_bg = "#f5f5f5"
+            fg = "#1f1f1f"
+            border = "#a5a5a5"
+            heading_bg = "#f1f1f1"
+            heading_fg = fg
+            hover_bg = "#e2e2e2"
+            select_bg = "#1f6aa5"
+            select_fg = "#ffffff"
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure(
+            style_name,
+            background=bg,
+            foreground=fg,
+            fieldbackground=bg,
+            bordercolor=border,
+            borderwidth=1,
+            rowheight=28,
+            relief="flat",
+        )
+        style.map(
+            style_name,
+            background=[("selected", select_bg)],
+            foreground=[("selected", select_fg)],
+        )
+        heading_style = f"{style_name}.Heading"
+        style.configure(
+            heading_style,
+            background=heading_bg,
+            foreground=heading_fg,
+            bordercolor=border,
+            relief="flat",
+        )
+        style.map(heading_style, background=[("active", hover_bg)])
+        return style_name, {
+            "row_even": bg,
+            "row_odd": alt_bg,
+            "fg": fg,
+            "select_fg": select_fg,
+        }
+
     def _refresh(self):
         if self._rename_entry is not None:
             self._finish_inline_edit(save=False)
         self.tree.delete(*self.tree.get_children())
-        for sid, k, v in get_specs(self.model_id):
-            self.tree.insert("", "end", iid=f"spec_{sid}", values=(k, v))
+        for idx, (sid, k, v) in enumerate(get_specs(self.model_id)):
+            tags = ("even",) if idx % 2 == 0 else ("odd",)
+            self.tree.insert("", "end", iid=f"spec_{sid}", values=(k, v), tags=tags)
+        if self._tree_colors:
+            self.tree.tag_configure(
+                "even",
+                background=self._tree_colors["row_even"],
+                foreground=self._tree_colors["fg"],
+            )
+            self.tree.tag_configure(
+                "odd",
+                background=self._tree_colors["row_odd"],
+                foreground=self._tree_colors["fg"],
+            )
+        self._update_controls_from_selection()
 
     def _on_tree_click(self, event):
         row = self.tree.identify_row(event.y)
@@ -200,15 +290,18 @@ class SpecsWindow(ctk.CTkToplevel):
         now = time.time()
         if region not in {"cell", "tree"}:
             self._rename_click = (None, None, now)
+            self.after_idle(self._update_controls_from_selection)
             return
         if not row or column not in {"#1", "#2"}:
             self._rename_click = (row, column, now)
+            self.after_idle(self._update_controls_from_selection)
             return
         last_row, last_col, last_time = self._rename_click
         self._rename_click = (row, column, now)
         delay = now - last_time
         if row == last_row and column == last_col and self._rename_delay_min <= delay <= self._rename_delay_max:
             self.after(0, lambda: self._start_inline_edit(row, column))
+        self.after_idle(self._update_controls_from_selection)
 
     def _start_inline_edit(self, iid: str, column: str):
         if not self.tree.exists(iid):
@@ -280,6 +373,7 @@ class SpecsWindow(ctk.CTkToplevel):
             self.tree.focus(iid)
             self.tree.see(iid)
         self.after(10, _select)
+        self.after(15, self._update_controls_from_selection)
 
     def _add(self):
         k = self.key_entry.get().strip()
@@ -304,6 +398,7 @@ class SpecsWindow(ctk.CTkToplevel):
             return
         update_spec(sid, k, v)
         self._refresh()
+        self._restore_selection(f"spec_{sid}")
 
     def _delete(self):
         selection = list(self.tree.selection())
@@ -321,6 +416,32 @@ class SpecsWindow(ctk.CTkToplevel):
         for sid in ids:
             delete_spec(sid)
         self._refresh()
+        self._update_controls_from_selection()
+
+    def _on_tree_select(self, _event):
+        self._update_controls_from_selection()
+
+    def _update_controls_from_selection(self):
+        selection = list(self.tree.selection())
+        if len(selection) != 1:
+            self.key_entry.delete(0, tk.END)
+            self.val_entry.delete(0, tk.END)
+            self._set_button_state(self.update_button, False)
+        else:
+            values = self.tree.item(selection[0], "values")
+            if values:
+                self.key_entry.delete(0, tk.END)
+                self.key_entry.insert(0, values[0])
+                self.val_entry.delete(0, tk.END)
+                self.val_entry.insert(0, values[1] if len(values) > 1 else "")
+            self._set_button_state(self.update_button, True)
+        self._set_button_state(self.delete_button, bool(selection))
+
+    @staticmethod
+    def _set_button_state(button, enabled: bool):
+        if button is None:
+            return
+        button.configure(state="normal" if enabled else "disabled")
 
 # ============================ GUI: ОСНОВНИЙ ДОДАТОК ============================
 
