@@ -245,10 +245,10 @@ def get_specs(model_id: int) -> List[Tuple[int, str, Optional[str]]]:
     return rows
 
 
-def insert_spec(model_id: int, key: str, value: str) -> None:
+def insert_spec(model_id: int, key: str, value: str) -> Optional[int]:
     key = key.strip()
     if not key:
-        return
+        return None
     conn = db_connect()
     cur = conn.cursor()
     cur.execute(
@@ -256,7 +256,9 @@ def insert_spec(model_id: int, key: str, value: str) -> None:
         (model_id, key, value),
     )
     conn.commit()
+    inserted_id = cur.lastrowid
     conn.close()
+    return inserted_id
 
 
 def update_spec(spec_id: int, key: str, value: str) -> None:
@@ -277,6 +279,28 @@ def delete_spec(spec_id: int) -> None:
     conn = db_connect()
     cur = conn.cursor()
     cur.execute("DELETE FROM model_specs WHERE id=?", (spec_id,))
+    conn.commit()
+    conn.close()
+
+
+def replace_specs(model_id: int, specs: Sequence[Tuple[str, str]]) -> None:
+    """Replace all specifications for a model while preserving order."""
+
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM model_specs WHERE model_id=?", (model_id,))
+    if specs:
+        payload: List[Tuple[int, str, str]] = []
+        for key, value in specs:
+            normalized_key = key.strip()
+            if not normalized_key:
+                continue
+            payload.append((model_id, normalized_key, value))
+        if payload:
+            cur.executemany(
+                "INSERT INTO model_specs(model_id, key, value) VALUES(?,?,?)",
+                payload,
+            )
     conn.commit()
     conn.close()
 
