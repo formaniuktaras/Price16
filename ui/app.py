@@ -9,7 +9,7 @@ import time
 import re
 from copy import deepcopy
 from itertools import islice
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -60,6 +60,7 @@ from database import (
     get_models,
     get_specs,
     insert_spec,
+    replace_specs,
     rename_brand,
     rename_category,
     rename_model,
@@ -133,6 +134,74 @@ def show_info(msg: str):
     messagebox.showinfo("Інформація", msg)
 
 
+class SpecsBulkEditor(ctk.CTkToplevel):
+    """Simple text-based editor for bulk specification updates."""
+
+    def __init__(
+        self,
+        master,
+        specs: Sequence[Tuple[str, str]],
+        apply_callback,
+    ) -> None:
+        super().__init__(master)
+        self._apply_callback = apply_callback
+        self.title("Масове редагування характеристик")
+        self.geometry("640x520")
+        self.minsize(520, 360)
+        self.transient(master)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        info_text = (
+            "Кожен рядок відповідає одній характеристиці. "
+            "Використовуйте табуляцію або ; для розділення назви та значення."
+        )
+        info = ctk.CTkLabel(self, text=info_text, wraplength=580, justify="left")
+        info.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
+
+        self.textbox = ctk.CTkTextbox(self, wrap="none")
+        self.textbox.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 12))
+        normalized_specs: List[Tuple[str, str]] = []
+        for key, value in specs:
+            safe_key = "" if key is None else str(key)
+            safe_value = "" if value is None else str(value)
+            normalized_specs.append((safe_key, safe_value))
+        initial = format_specs_for_clipboard(normalized_specs)
+        if initial:
+            self.textbox.insert("1.0", initial)
+        self.textbox.focus_set()
+
+        btn_frame = ctk.CTkFrame(self)
+        btn_frame.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 16))
+        btn_frame.columnconfigure(0, weight=1)
+
+        self.apply_button = ctk.CTkButton(btn_frame, text="Застосувати", command=self._on_apply)
+        self.apply_button.grid(row=0, column=1, padx=(0, 8))
+
+        self.cancel_button = ctk.CTkButton(
+            btn_frame,
+            text="Скасувати",
+            fg_color="#444444",
+            hover_color="#333333",
+            command=self._on_cancel,
+        )
+        self.cancel_button.grid(row=0, column=2)
+
+    def _on_apply(self) -> None:
+        if not callable(self._apply_callback):
+            self.destroy()
+            return
+        payload = self.textbox.get("1.0", tk.END)
+        should_close = self._apply_callback(payload)
+        if should_close:
+            self.destroy()
+
+    def _on_cancel(self) -> None:
+        self.destroy()
+
 
 # ============================ GUI: ВІКНО ХАРАКТЕРИСТИК ============================
 
@@ -146,6 +215,39 @@ class SpecsWindow(ctk.CTkToplevel):
 
         self._tree_style_name, self._tree_colors = self._init_tree_style()
 
+        self._current_specs: List[Tuple[int, str, Optional[str]]] = []
+        self._filter_after_id: Optional[str] = None
+        self._bulk_editor = None
+
+        binder = getattr(master, "_bind_clipboard_shortcuts", None)
+
+        # Панель пошуку
+        filter_bar = ctk.CTkFrame(self)
+        filter_bar.pack(fill="x", padx=10, pady=(10, 0))
+
+        ctk.CTkLabel(filter_bar, text="Пошук:").pack(side="left", padx=(6, 6))
+
+        self.filter_var = tk.StringVar()
+        self.filter_entry = ctk.CTkEntry(
+            filter_bar,
+            textvariable=self.filter_var,
+            placeholder_text="Наприклад: Діагональ",
+        )
+        self.filter_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self.filter_var.trace_add("write", lambda *_: self._schedule_filter_update())
+        self.filter_entry.bind("<Return>", lambda _e: self._apply_filter())
+        self.filter_entry.bind("<Escape>", lambda _e: self._clear_filter())
+        if callable(binder):
+            binder(self.filter_entry)
+
+        self.clear_filter_button = ctk.CTkButton(
+            filter_bar,
+            text="Скинути",
+            width=90,
+            command=self._clear_filter,
+        )
+        self.clear_filter_button.pack(side="left")
+
         # Таблиця
         self.tree = ttk.Treeview(
             self,
@@ -158,7 +260,7 @@ class SpecsWindow(ctk.CTkToplevel):
         self.tree.heading("value", text="Значення")
         self.tree.column("key", width=260, anchor="w")
         self.tree.column("value", width=360, anchor="w")
-        self.tree.pack(fill="both", expand=True, padx=10, pady=10)
+        self.tree.pack(fill="both", expand=True, padx=10, pady=(6, 10))
 
         scroll = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
@@ -179,7 +281,6 @@ class SpecsWindow(ctk.CTkToplevel):
 
         self.key_entry = ctk.CTkEntry(ctrl, placeholder_text="Напр.: Діагональ екрану")
         self.key_entry.pack(side="left", fill="x", expand=True, padx=5)
-        binder = getattr(master, "_bind_clipboard_shortcuts", None)
         if callable(binder):
             binder(self.key_entry)
         self.val_entry = ctk.CTkEntry(ctrl, placeholder_text="Напр.: 6.7''")
@@ -202,6 +303,13 @@ class SpecsWindow(ctk.CTkToplevel):
 
         bulk_ctrl = ctk.CTkFrame(self)
         bulk_ctrl.pack(fill="x", padx=10, pady=(0, 10))
+
+        self.bulk_edit_button = ctk.CTkButton(
+            bulk_ctrl,
+            text="Масове редагування",
+            command=self._open_bulk_editor,
+        )
+        self.bulk_edit_button.pack(side="left", padx=5)
 
         self.import_clipboard_button = ctk.CTkButton(
             bulk_ctrl,
@@ -299,22 +407,15 @@ class SpecsWindow(ctk.CTkToplevel):
     def _refresh(self):
         if self._rename_entry is not None:
             self._finish_inline_edit(save=False)
-        self.tree.delete(*self.tree.get_children())
-        for idx, (sid, k, v) in enumerate(get_specs(self.model_id)):
-            tags = ("even",) if idx % 2 == 0 else ("odd",)
-            self.tree.insert("", "end", iid=f"spec_{sid}", values=(k, v), tags=tags)
-        if self._tree_colors:
-            self.tree.tag_configure(
-                "even",
-                background=self._tree_colors["row_even"],
-                foreground=self._tree_colors["fg"],
-            )
-            self.tree.tag_configure(
-                "odd",
-                background=self._tree_colors["row_odd"],
-                foreground=self._tree_colors["fg"],
-            )
-        self._update_controls_from_selection()
+        fresh_specs: List[Tuple[int, str, Optional[str]]] = []
+        for sid, key, value in get_specs(self.model_id):
+            if not isinstance(key, str):
+                key = str(key)
+            if value is not None and not isinstance(value, str):
+                value = str(value)
+            fresh_specs.append((sid, key, value))
+        self._current_specs = fresh_specs
+        self._apply_filter()
 
     def _on_tree_click(self, event):
         row = self.tree.identify_row(event.y)
@@ -476,18 +577,174 @@ class SpecsWindow(ctk.CTkToplevel):
             return
         button.configure(state="normal" if enabled else "disabled")
 
+    def _schedule_filter_update(self):
+        if self._filter_after_id is not None:
+            try:
+                self.after_cancel(self._filter_after_id)
+            except Exception:
+                pass
+        self._filter_after_id = self.after(150, self._apply_filter)
+
+    def _apply_filter(self):
+        if self._filter_after_id is not None:
+            try:
+                self.after_cancel(self._filter_after_id)
+            except Exception:
+                pass
+        self._filter_after_id = None
+        self._render_specs(self._filtered_specs())
+
+    def _clear_filter(self):
+        if self.filter_var.get():
+            self.filter_var.set("")
+        self._apply_filter()
+        try:
+            self.filter_entry.focus_set()
+        except Exception:
+            pass
+
+    def _filtered_specs(self) -> List[Tuple[int, str, Optional[str]]]:
+        query = (self.filter_var.get() or "").strip().lower()
+        if not query:
+            return list(self._current_specs)
+        filtered: List[Tuple[int, str, Optional[str]]] = []
+        for sid, key, value in self._current_specs:
+            key_text = key or ""
+            value_text = ""
+            if value is not None:
+                value_text = str(value)
+            if query in key_text.lower() or (value_text and query in value_text.lower()):
+                filtered.append((sid, key_text, value))
+        return filtered
+
+    def _render_specs(self, specs: Optional[Sequence[Tuple[int, str, Optional[str]]]] = None):
+        data = list(specs or [])
+        if not data:
+            data = [] if specs is not None else list(self._current_specs)
+        selected = list(self.tree.selection())
+        focus = self.tree.focus()
+        self.tree.delete(*self.tree.get_children())
+        for idx, (sid, key, value) in enumerate(data):
+            iid = f"spec_{sid}"
+            display_value = value if value is not None else ""
+            tags = ("even",) if idx % 2 == 0 else ("odd",)
+            self.tree.insert("", "end", iid=iid, values=(key, display_value), tags=tags)
+        if self._tree_colors:
+            self.tree.tag_configure(
+                "even",
+                background=self._tree_colors.get("row_even"),
+                foreground=self._tree_colors.get("fg"),
+            )
+            self.tree.tag_configure(
+                "odd",
+                background=self._tree_colors.get("row_odd"),
+                foreground=self._tree_colors.get("fg"),
+            )
+        restored = [iid for iid in selected if self.tree.exists(iid)]
+        if restored:
+            self.tree.selection_set(restored)
+            if focus and self.tree.exists(focus):
+                self.tree.focus(focus)
+        else:
+            self.tree.selection_remove(self.tree.selection())
+            self.tree.focus("")
+        self.after_idle(self._update_controls_from_selection)
+
     def _collect_specs(self) -> List[Tuple[str, str]]:
         specs: List[Tuple[str, str]] = []
-        for iid in self.tree.get_children():
-            values = self.tree.item(iid, "values")
-            if not values:
-                continue
-            key = str(values[0]).strip()
-            value = ""
-            if len(values) > 1 and values[1] is not None:
-                value = str(values[1]).strip()
-            specs.append((key, value))
+        for _sid, key, value in self._current_specs:
+            safe_key = (key or "").strip()
+            safe_value = ""
+            if value is not None:
+                safe_value = str(value).strip()
+            specs.append((safe_key, safe_value))
         return specs
+
+    def _open_bulk_editor(self):
+        if self._bulk_editor is not None and self._bulk_editor.winfo_exists():
+            try:
+                self._bulk_editor.focus_set()
+            except Exception:
+                pass
+            return
+        specs_payload: List[Tuple[str, str]] = []
+        for _sid, key, value in self._current_specs:
+            safe_key = str(key) if key is not None else ""
+            safe_value = "" if value is None else str(value)
+            specs_payload.append((safe_key, safe_value))
+        editor = SpecsBulkEditor(self, specs_payload, self._apply_bulk_editor_payload)
+        binder = getattr(self.master, "_bind_clipboard_shortcuts", None)
+        if callable(binder):
+            binder(editor.textbox)
+        editor.bind("<Destroy>", lambda _e: setattr(self, "_bulk_editor", None))
+        self._bulk_editor = editor
+
+    def _apply_bulk_editor_payload(self, raw: str) -> bool:
+        pairs = parse_specs_payload(raw)
+        ordered: List[Tuple[str, str]] = []
+        index_map: Dict[str, int] = {}
+        for key, value in pairs:
+            normalized_key = key.strip()
+            if not normalized_key:
+                continue
+            normalized_value = (value or "").strip()
+            lookup = normalized_key.lower()
+            existing_index = index_map.get(lookup)
+            if existing_index is None:
+                index_map[lookup] = len(ordered)
+                ordered.append((normalized_key, normalized_value))
+            else:
+                ordered[existing_index] = (normalized_key, normalized_value)
+
+        existing_map: Dict[str, Tuple[Optional[int], str, str]] = {}
+        for sid, key, value in self._current_specs:
+            normalized_key = (key or "").strip()
+            if not normalized_key:
+                continue
+            lookup = normalized_key.lower()
+            existing_map[lookup] = (sid, (value or "").strip(), normalized_key)
+
+        if not ordered and existing_map:
+            if not messagebox.askyesno(
+                "Підтвердження",
+                "Очистити всі характеристики моделі?",
+            ):
+                return False
+
+        after_values = {key.lower(): value for key, value in ordered}
+        after_keys = {key.lower(): key for key, _value in ordered}
+
+        inserted = sum(1 for key in after_values if key not in existing_map)
+        updated = 0
+        for key, value in after_values.items():
+            if key not in existing_map:
+                continue
+            _, current_value, current_key = existing_map[key]
+            new_key = after_keys.get(key, current_key)
+            if current_value != value or current_key != new_key:
+                updated += 1
+        removed = sum(1 for key in existing_map if key not in after_values)
+
+        try:
+            replace_specs(self.model_id, ordered)
+        except Exception as exc:
+            logger.exception("Failed to apply bulk specs", exc_info=exc)
+            show_error(f"Не вдалося зберегти зміни: {exc}")
+            return False
+
+        self._refresh()
+
+        summary_parts = []
+        if inserted:
+            summary_parts.append(f"додано: {inserted}")
+        if updated:
+            summary_parts.append(f"оновлено: {updated}")
+        if removed:
+            summary_parts.append(f"видалено: {removed}")
+        if not summary_parts:
+            summary_parts.append("змін не внесено")
+        show_info("Масове редагування виконано:\n" + ", ".join(summary_parts))
+        return True
 
     # ------------------------------ Імпорт/експорт ---------------------------------
 
@@ -523,7 +780,12 @@ class SpecsWindow(ctk.CTkToplevel):
         if not pairs:
             show_info("Не знайдено характеристик для імпорту.")
             return
-        existing = {key.strip(): (sid, (value or "").strip()) for sid, key, value in get_specs(self.model_id)}
+        existing: Dict[str, Tuple[Optional[int], str, str]] = {}
+        for sid, key, value in get_specs(self.model_id):
+            normalized_key = (key or "").strip()
+            if not normalized_key:
+                continue
+            existing[normalized_key.lower()] = (sid, (value or "").strip(), normalized_key)
         inserted = 0
         updated = 0
         skipped = 0
@@ -533,20 +795,25 @@ class SpecsWindow(ctk.CTkToplevel):
                 skipped += 1
                 continue
             normalized_value = (value or "").strip()
-            stored = existing.get(normalized_key)
+            lookup = normalized_key.lower()
+            stored = existing.get(lookup)
             if stored is None:
-                insert_spec(self.model_id, normalized_key, normalized_value)
-                existing[normalized_key] = (None, normalized_value)
+                new_id = insert_spec(self.model_id, normalized_key, normalized_value)
+                existing[lookup] = (new_id, normalized_value, normalized_key)
                 inserted += 1
                 continue
-            sid, current_value = stored
-            if current_value == normalized_value:
+            sid, current_value, current_key = stored
+            if current_value == normalized_value and current_key == normalized_key:
                 skipped += 1
                 continue
             if sid is not None:
                 update_spec(sid, normalized_key, normalized_value)
-            existing[normalized_key] = (sid, normalized_value)
-            updated += 1
+                existing[lookup] = (sid, normalized_value, normalized_key)
+                updated += 1
+            else:
+                new_id = insert_spec(self.model_id, normalized_key, normalized_value)
+                existing[lookup] = (new_id, normalized_value, normalized_key)
+                inserted += 1
         self._refresh()
         summary_parts = []
         if inserted:
