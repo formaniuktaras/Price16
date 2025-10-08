@@ -15,6 +15,11 @@ def test_parse_specs_payload_ignores_headers():
     assert parse_specs_payload(raw) == [("Вага", "1 кг"), ("Колір", "Чорний")]
 
 
+def test_parse_specs_payload_strips_bom_characters():
+    raw = "\ufeffНазва параметра;Значення\n\ufeffВага;1 кг"
+    assert parse_specs_payload(raw) == [("Вага", "1 кг")]
+
+
 def test_parse_specs_payload_skips_comments_and_empty_lines():
     raw = "# comment\n\nМатеріал корпусу: метал\n\n"
     assert parse_specs_payload(raw) == [("Матеріал корпусу", "метал")]
