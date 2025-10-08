@@ -31,6 +31,8 @@ def parse_specs_payload(raw: str) -> List[Tuple[str, str]]:
     first_data_row = True
     for line in lines:
         candidate = line.strip()
+        if candidate.startswith("\ufeff"):
+            candidate = candidate.lstrip("\ufeff")
         if not candidate:
             continue
         if candidate.startswith("#"):
@@ -45,6 +47,8 @@ def parse_specs_payload(raw: str) -> List[Tuple[str, str]]:
                 value = value_part
                 break
         key = key.strip().strip('"').strip("'").rstrip(":;,=")
+        if key.startswith("\ufeff"):
+            key = key.lstrip("\ufeff")
         if not key:
             continue
         lower_key = key.lower()
@@ -52,6 +56,8 @@ def parse_specs_payload(raw: str) -> List[Tuple[str, str]]:
             # skip header line
             continue
         value = value.strip().strip('"').strip("'")
+        if value.startswith("\ufeff"):
+            value = value.lstrip("\ufeff")
         pairs.append((key, value))
         first_data_row = False
     return pairs
