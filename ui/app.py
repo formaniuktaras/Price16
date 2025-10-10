@@ -18,6 +18,7 @@ from templates_service import (
     APP_TITLE,
     DEPENDENCY_WARNINGS,
     CATEGORY_SCOPE_DEFAULT_LABEL,
+    GLOBAL_DESCRIPTION_KEY,
     DEFAULT_TEMPLATES,
     FILM_TYPE_DEFAULT_LABEL,
     TEMPLATE_LANGUAGE_DEFAULT_LABEL,
@@ -1498,7 +1499,7 @@ class App(ctk.CTk):
         for name in self.templates.get("descriptions", {}).keys():
             if isinstance(name, str):
                 stripped = name.strip()
-                if stripped:
+                if stripped and stripped != GLOBAL_DESCRIPTION_KEY:
                     names.add(stripped)
         items = [(CATEGORY_SCOPE_DEFAULT_LABEL, None)]
         for name in sorted(names):
@@ -1556,13 +1557,6 @@ class App(ctk.CTk):
             language_label = self._template_language_code_to_label.get(current_lang, TEMPLATE_LANGUAGE_DEFAULT_LABEL)
             self.template_language_var.set(language_label)
             self.template_language_menu.set(language_label)
-
-        self._on_template_scope_change()
-
-        if current_cat and isinstance(current_cat, str):
-            self._current_desc_category = current_cat
-            if hasattr(self, "desc_cat_var"):
-                self.desc_cat_var.set(current_cat)
 
         self._on_template_scope_change()
 
@@ -2185,26 +2179,18 @@ class App(ctk.CTk):
         self._current_template_category = category_key
         self._current_film_type_key = film_key
         self._current_template_language = language_code
-        if category_key and hasattr(self, "desc_cat_var"):
-            self._current_desc_category = category_key
-            self.desc_cat_var.set(category_key)
+        target_category = category_key if category_key else GLOBAL_DESCRIPTION_KEY
+        self._current_desc_category = target_category
+        if hasattr(self, "desc_cat_var"):
+            self.desc_cat_var.set(target_category)
         self._load_title_tags_template()
         self._load_desc_template()
 
     def _load_desc_template(self):
         if not hasattr(self, "desc_box"):
             return
-        category = self._current_template_category
+        category = getattr(self, "_current_desc_category", None) or GLOBAL_DESCRIPTION_KEY
         film = self._selected_film_type_key()
-        if not category:
-            self.desc_box.configure(state="normal")
-            self.desc_box.delete("1.0", "end")
-            self.desc_box.insert("1.0", "Оберіть категорію, щоб редагувати опис.")
-            self.desc_box.configure(state="disabled")
-            if hasattr(self, "desc_save_button"):
-                self.desc_save_button.configure(state="disabled")
-            return
-
         if hasattr(self, "desc_save_button"):
             self.desc_save_button.configure(state="normal")
         self.desc_box.configure(state="normal")
@@ -2215,31 +2201,64 @@ class App(ctk.CTk):
         if not isinstance(descs_by_category, dict):
             descs_by_category = {}
             self.templates["descriptions"] = descs_by_category
-        descs = descs_by_category.setdefault(category, {})
+        descs = descs_by_category.get(category)
         if not isinstance(descs, dict):
             descs = {}
             descs_by_category[category] = descs
+        if category != GLOBAL_DESCRIPTION_KEY:
+            global_descs = descs_by_category.get(GLOBAL_DESCRIPTION_KEY)
+            if not isinstance(global_descs, dict):
+                global_descs = {}
+                if GLOBAL_DESCRIPTION_KEY not in descs_by_category:
+                    descs_by_category[GLOBAL_DESCRIPTION_KEY] = global_descs
+        else:
+            global_descs = descs
         target_key = film if film != "default" else "default"
-        raw_entry = descs.get(target_key)
-        fallback_entry = descs.get("default") if target_key != "default" else None
+        sources = [descs]
+        if category != GLOBAL_DESCRIPTION_KEY:
+            sources.append(global_descs)
+        raw_entry = None
+        raw_store = None
+        for store in sources:
+            if isinstance(store, dict):
+                candidate = store.get(target_key)
+                if candidate is not None:
+                    raw_entry = candidate
+                    raw_store = store
+                    break
+        fallback_entry = None
+        fallback_store = None
+        if target_key != "default":
+            for store in sources:
+                if isinstance(store, dict):
+                    candidate = store.get("default")
+                    if candidate is not None:
+                        fallback_entry = candidate
+                        fallback_store = store
+                        break
         language_code = self._current_template_language
         changed = False
 
-        def _resolve_entry(entry, key=None):
+        def _resolve_entry(entry, key=None, store=None):
             nonlocal changed
             if isinstance(entry, dict):
                 normalized = _normalize_template_language_entry(entry)
-                if key is not None and normalized is not entry:
-                    descs[key] = normalized
+                if (
+                    key is not None
+                    and store is not None
+                    and isinstance(store, dict)
+                    and normalized is not entry
+                ):
+                    store[key] = normalized
                     changed = True
                 return _get_language_template_value(normalized, language_code, fallback_value=None)
             if isinstance(entry, str):
                 return entry
             return None
 
-        txt = _resolve_entry(raw_entry, key=target_key)
+        txt = _resolve_entry(raw_entry, key=target_key, store=raw_store)
         if txt is None and fallback_entry is not None:
-            txt = _resolve_entry(fallback_entry, key="default")
+            txt = _resolve_entry(fallback_entry, key="default", store=fallback_store)
         if txt is None:
             txt = ""
         if changed:
@@ -2248,9 +2267,15 @@ class App(ctk.CTk):
         self.desc_box.insert("1.0", txt)
 
     def _save_desc_template(self):
-        category = self._current_template_category or self.desc_cat_var.get()
+        category = getattr(self, "_current_desc_category", None)
+        if not category or category == GLOBAL_DESCRIPTION_KEY:
+            template_category = getattr(self, "_current_template_category", None)
+            if template_category:
+                category = template_category
         if not category:
-            return show_error("Виберіть категорію для збереження опису.")
+            category = self.desc_cat_var.get()
+        if not category:
+            category = GLOBAL_DESCRIPTION_KEY
         film = self._selected_film_type_key()
         txt = self.desc_box.get("1.0", "end").strip()
         language_code = self._current_template_language
