@@ -115,6 +115,8 @@ EXPORT_FIELDS_FILE = "export_fields.json"
 TITLE_TAGS_FILE = "title_tags_templates.json"
 FILM_TYPE_DEFAULT_LABEL = "Універсальний шаблон"
 CATEGORY_SCOPE_DEFAULT_LABEL = "Для всіх категорій"
+# Ключ для шаблонів опису, які застосовуються для всіх категорій
+GLOBAL_DESCRIPTION_KEY = "__global__"
 TEMPLATE_LANGUAGE_DEFAULT_LABEL = "За замовчуванням"
 
 DEFAULT_TEMPLATE_LANGUAGES = [
@@ -286,6 +288,9 @@ DEFAULT_TEMPLATES = {
     "title_template": "Гідрогелева плівка {{ film_type }} {{ brand }} {{ model }}",
     "tags_template": "{{ brand }} {{ model }}, плівка {{ brand }} {{ model }}, hydrogel film {{ brand }} {{ model }}, {{ film_type }} {{ brand }} {{ model }}",
     "descriptions": {
+        GLOBAL_DESCRIPTION_KEY: {
+            "default": "{{ brand }} {{ model }} — надійний захист екрана гідрогелевою плівкою."
+        },
         "Смартфони": {
             "прозора": "Прозора плівка для {{ brand }} {{ model }} — базовий прозорий захист, висока чутливість та легка поклейка.",
             "матова": "Матова плівка для {{ brand }} {{ model }} — мінімум відблисків, комфорт на сонці, приємний тактильний ефект.",
@@ -979,6 +984,11 @@ def generate_export_rows(
     column_order = [field["field"] for field in enabled_fields]
 
     descriptions = templates.get("descriptions", {})
+    global_desc_block = {}
+    if isinstance(descriptions, dict):
+        candidate = descriptions.get(GLOBAL_DESCRIPTION_KEY)
+        if isinstance(candidate, dict):
+            global_desc_block = candidate
     template_languages = _normalize_language_definitions(templates.get("template_languages"))
     template_language_codes = [item.get("code") for item in template_languages if item.get("code")]
     template_language_codes = [code for code in template_language_codes if isinstance(code, str) and code.strip()]
@@ -1025,7 +1035,20 @@ def generate_export_rows(
         def spec_lookup(key, default=""):
             return specs.get(key, default)
 
-        cat_desc_block = descriptions.get(cat, {}) if isinstance(descriptions, dict) else {}
+        cat_desc_block: Dict[str, dict] = {}
+        if isinstance(descriptions, dict):
+            cat_block = descriptions.get(cat)
+            if isinstance(cat_block, dict):
+                cat_desc_block = cat_block
+
+        def _entry_from_blocks(key: str):
+            sources = [cat_desc_block, global_desc_block]
+            for block in sources:
+                if isinstance(block, dict):
+                    value = block.get(key)
+                    if isinstance(value, (dict, str)):
+                        return value
+            return None
         for f in film_types:
             film_type = f if isinstance(f, str) else str(f)
             cache_key = (cat, film_type)
@@ -1092,8 +1115,8 @@ def generate_export_rows(
             desc_key = (cat, film_type)
             desc_compiled = desc_template_cache.get(desc_key)
             if desc_compiled is None:
-                film_entry = cat_desc_block.get(film_type)
-                default_entry = cat_desc_block.get("default")
+                film_entry = _entry_from_blocks(film_type)
+                default_entry = _entry_from_blocks("default")
                 fallback_desc = "Плівка для {{ brand }} {{ model }}"
                 desc_compiled = {}
                 for code in language_iteration:

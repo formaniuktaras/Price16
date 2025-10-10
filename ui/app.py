@@ -2,13 +2,18 @@
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import os
 import sys
 import time
 import re
+import threading
 from copy import deepcopy
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from itertools import islice
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import tkinter as tk
@@ -18,6 +23,7 @@ from templates_service import (
     APP_TITLE,
     DEPENDENCY_WARNINGS,
     CATEGORY_SCOPE_DEFAULT_LABEL,
+    GLOBAL_DESCRIPTION_KEY,
     DEFAULT_TEMPLATES,
     FILM_TYPE_DEFAULT_LABEL,
     TEMPLATE_LANGUAGE_DEFAULT_LABEL,
@@ -72,6 +78,9 @@ from specs_io import format_specs_for_clipboard, parse_specs_payload
 
 logger = logging.getLogger(__name__)
 
+DESC_EDITOR_DIST = (Path(__file__).resolve().parent.parent / "desc-editor" / "dist").resolve()
+DESC_EDITOR_ENTRY = DESC_EDITOR_DIST / "index.html"
+
 
 try:
     import customtkinter as ctk
@@ -81,6 +90,11 @@ except ModuleNotFoundError:
         "Встановіть її командою 'pip install customtkinter' і перезапустіть застосунок."
     )
     sys.exit(1)
+
+try:
+    import webview  # type: ignore
+except ModuleNotFoundError:
+    webview = None
 
 _INPUT_SPLIT_RE = re.compile(r"[\n\r,;\u201a\u201e\uFF0C\u3001]+")
 def split_catalog_input(raw: str):
@@ -132,6 +146,107 @@ def show_error(msg: str):
 
 def show_info(msg: str):
     messagebox.showinfo("Інформація", msg)
+
+
+class DescriptionEditorHost:
+    """Bridge between the desktop UI and the web-based description editor."""
+
+    def __init__(self, docs: Dict[str, Dict[str, object]], active_lang: str = "uk") -> None:
+        self._docs = docs
+        self._active_lang = active_lang if active_lang in docs else next(iter(docs or {"uk": {}}))
+        self._server: Optional[ThreadingHTTPServer] = None
+        self._thread: Optional[threading.Thread] = None
+        self._window = None
+        self.result: Optional[Dict[str, Dict[str, object]]] = None
+
+    def _shutdown_server(self) -> None:
+        if self._server is not None:
+            try:
+                self._server.shutdown()
+            except Exception:  # pragma: no cover - best effort cleanup
+                logger.exception("Не вдалося коректно зупинити веб-сервер редактора")
+            try:
+                self._server.server_close()
+            except Exception:
+                logger.exception("Не вдалося закрити сокет веб-сервера")
+            self._server = None
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+            self._thread = None
+
+    def _on_closing(self) -> None:
+        if self._window is None:
+            return
+        try:
+            raw = self._window.evaluate_js(
+                "window.__DESC_EDITOR__ ? window.__DESC_EDITOR__.getState() : null"
+            )
+            if raw and raw != "null":
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8", errors="ignore")
+                data = json.loads(raw)
+                docs = data.get("docs") if isinstance(data, dict) else None
+                if isinstance(docs, dict):
+                    self.result = docs  # type: ignore[assignment]
+        except Exception:
+            logger.exception("Не вдалося зчитати дані з веб-редактора")
+
+    def open(self) -> Optional[Dict[str, Dict[str, object]]]:
+        self.result = None
+        if webview is None:
+            show_error(
+                "Для візуального редактора встановіть пакет 'pywebview' (pip install pywebview)."
+            )
+            return None
+        if not DESC_EDITOR_ENTRY.exists():
+            show_error(
+                "Фронтенд редактора не знайдено. Перейдіть у каталог 'desc-editor' та виконайте "
+                "'npm install' і 'npm run build'."
+            )
+            return None
+
+        handler = partial(SimpleHTTPRequestHandler, directory=str(DESC_EDITOR_DIST))
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        server.daemon_threads = True
+        self._server = server
+        self._thread = threading.Thread(target=server.serve_forever, daemon=True)
+        self._thread.start()
+        port = server.server_address[1]
+
+        url = f"http://127.0.0.1:{port}/index.html"
+        window = webview.create_window(
+            "Редактор шаблону опису",
+            url,
+            width=1180,
+            height=820,
+            resizable=True,
+        )
+        self._window = window
+        window.events.closing += self._on_closing
+
+        initial_payload = json.dumps(
+            {
+                "activeLang": self._active_lang,
+                "docs": self._docs,
+            }
+        )
+
+        def _inject_state() -> None:
+            try:
+                window.evaluate_js(
+                    "(function(){const payload="
+                    + initial_payload
+                    + ";function apply(){if(window.__DESC_EDITOR__){window.__DESC_EDITOR__.setState(payload);window.__DESC_EDITOR__.setMode('visual');}else{setTimeout(apply,80);}}apply();})();"
+                )
+            except Exception:
+                logger.exception("Не вдалося передати початковий стан у веб-редактор")
+
+        try:
+            webview.start(_inject_state, window)
+        finally:
+            self._shutdown_server()
+
+        return self.result
 
 
 class SpecsBulkEditor(ctk.CTkToplevel):
@@ -1498,7 +1613,7 @@ class App(ctk.CTk):
         for name in self.templates.get("descriptions", {}).keys():
             if isinstance(name, str):
                 stripped = name.strip()
-                if stripped:
+                if stripped and stripped != GLOBAL_DESCRIPTION_KEY:
                     names.add(stripped)
         items = [(CATEGORY_SCOPE_DEFAULT_LABEL, None)]
         for name in sorted(names):
@@ -1556,13 +1671,6 @@ class App(ctk.CTk):
             language_label = self._template_language_code_to_label.get(current_lang, TEMPLATE_LANGUAGE_DEFAULT_LABEL)
             self.template_language_var.set(language_label)
             self.template_language_menu.set(language_label)
-
-        self._on_template_scope_change()
-
-        if current_cat and isinstance(current_cat, str):
-            self._current_desc_category = current_cat
-            if hasattr(self, "desc_cat_var"):
-                self.desc_cat_var.set(current_cat)
 
         self._on_template_scope_change()
 
@@ -2103,7 +2211,24 @@ class App(ctk.CTk):
         right.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=5)
 
         ctk.CTkLabel(right, text="Шаблон опису (доступні {{ brand }}, {{ model }}, {{ film_type }})").pack(anchor="w", padx=10, pady=(10, 0))
-        self.desc_box = ctk.CTkTextbox(right)
+        editor_toolbar = ctk.CTkFrame(right)
+        editor_toolbar.pack(fill="x", padx=10, pady=(6, 0))
+        can_use_web_editor = webview is not None and DESC_EDITOR_ENTRY.exists()
+        self.desc_editor_btn = ctk.CTkButton(
+            editor_toolbar,
+            text="Відкрити візуальний редактор",
+            command=self._open_desc_editor,
+            state="normal" if can_use_web_editor else "disabled",
+        )
+        self.desc_editor_btn.pack(side="left")
+        hint_text = (
+            "Відкриває редактор з інструментами форматування Prom.ua"
+            if can_use_web_editor
+            else "Потрібно встановити pywebview та зібрати веб-редактор"
+        )
+        ctk.CTkLabel(editor_toolbar, text=hint_text).pack(side="left", padx=12)
+
+        self.desc_box = ctk.CTkTextbox(right, fg_color="#ffffff", text_color="#1f2933")
         self.desc_box.pack(fill="both", expand=True, padx=10, pady=5)
         self._bind_clipboard_shortcuts(self.desc_box)
         self._bind_clipboard_context_menu(self.desc_box)
@@ -2185,72 +2310,172 @@ class App(ctk.CTk):
         self._current_template_category = category_key
         self._current_film_type_key = film_key
         self._current_template_language = language_code
-        if category_key and hasattr(self, "desc_cat_var"):
-            self._current_desc_category = category_key
-            self.desc_cat_var.set(category_key)
+        target_category = category_key if category_key else GLOBAL_DESCRIPTION_KEY
+        self._current_desc_category = target_category
+        if hasattr(self, "desc_cat_var"):
+            self.desc_cat_var.set(target_category)
         self._load_title_tags_template()
         self._load_desc_template()
 
-    def _load_desc_template(self):
-        if not hasattr(self, "desc_box"):
-            return
-        category = self._current_template_category
-        film = self._selected_film_type_key()
-        if not category:
-            self.desc_box.configure(state="normal")
-            self.desc_box.delete("1.0", "end")
-            self.desc_box.insert("1.0", "Оберіть категорію, щоб редагувати опис.")
-            self.desc_box.configure(state="disabled")
-            if hasattr(self, "desc_save_button"):
-                self.desc_save_button.configure(state="disabled")
-            return
+    def _resolve_desc_template_html(self, category: Optional[str], film: str, language_code: Optional[str]):
+        category_key = category or GLOBAL_DESCRIPTION_KEY
+        film_key = film if film and film != "default" else "default"
+        changed = False
 
-        if hasattr(self, "desc_save_button"):
-            self.desc_save_button.configure(state="normal")
-        self.desc_box.configure(state="normal")
-        if hasattr(self, "desc_cat_var"):
-            self.desc_cat_var.set(category)
-        self._current_desc_category = category
         descs_by_category = self.templates.get("descriptions", {})
         if not isinstance(descs_by_category, dict):
             descs_by_category = {}
             self.templates["descriptions"] = descs_by_category
-        descs = descs_by_category.setdefault(category, {})
+            changed = True
+
+        descs = descs_by_category.get(category_key)
         if not isinstance(descs, dict):
             descs = {}
-            descs_by_category[category] = descs
-        target_key = film if film != "default" else "default"
-        raw_entry = descs.get(target_key)
-        fallback_entry = descs.get("default") if target_key != "default" else None
-        language_code = self._current_template_language
-        changed = False
+            descs_by_category[category_key] = descs
+            changed = True
 
-        def _resolve_entry(entry, key=None):
+        if category_key != GLOBAL_DESCRIPTION_KEY:
+            global_descs = descs_by_category.get(GLOBAL_DESCRIPTION_KEY)
+            if not isinstance(global_descs, dict):
+                global_descs = {}
+                descs_by_category[GLOBAL_DESCRIPTION_KEY] = global_descs
+                changed = True
+        else:
+            global_descs = descs
+
+        sources = [descs]
+        if category_key != GLOBAL_DESCRIPTION_KEY:
+            sources.append(global_descs)
+
+        raw_entry = None
+        raw_store = None
+        for store in sources:
+            if isinstance(store, dict):
+                candidate = store.get(film_key)
+                if candidate is not None:
+                    raw_entry = candidate
+                    raw_store = store
+                    break
+
+        fallback_entry = None
+        fallback_store = None
+        if film_key != "default":
+            for store in sources:
+                if isinstance(store, dict):
+                    candidate = store.get("default")
+                    if candidate is not None:
+                        fallback_entry = candidate
+                        fallback_store = store
+                        break
+
+        normalized_language = language_code if language_code else None
+
+        def _resolve_entry(entry, key=None, store=None):
             nonlocal changed
+            value = None
             if isinstance(entry, dict):
                 normalized = _normalize_template_language_entry(entry)
-                if key is not None and normalized is not entry:
-                    descs[key] = normalized
+                if (
+                    key is not None
+                    and store is not None
+                    and isinstance(store, dict)
+                    and normalized is not entry
+                ):
+                    store[key] = normalized
                     changed = True
-                return _get_language_template_value(normalized, language_code, fallback_value=None)
-            if isinstance(entry, str):
-                return entry
-            return None
+                value = _get_language_template_value(normalized, normalized_language, fallback_value=None)
+                if value is None and normalized_language:
+                    value = _get_language_template_value(normalized, None, fallback_value=None)
+            elif isinstance(entry, str):
+                value = entry
+            return value
 
-        txt = _resolve_entry(raw_entry, key=target_key)
-        if txt is None and fallback_entry is not None:
-            txt = _resolve_entry(fallback_entry, key="default")
-        if txt is None:
-            txt = ""
+        html = _resolve_entry(raw_entry, key=film_key, store=raw_store)
+        if html is None and fallback_entry is not None:
+            html = _resolve_entry(fallback_entry, key="default", store=fallback_store)
+        if html is None:
+            html = ""
+        return html, changed
+
+    def _load_desc_template(self):
+        if not hasattr(self, "desc_box"):
+            return
+        category = getattr(self, "_current_desc_category", None) or GLOBAL_DESCRIPTION_KEY
+        film = self._selected_film_type_key()
+        if hasattr(self, "desc_save_button"):
+            self.desc_save_button.configure(state="normal")
+        if hasattr(self, "desc_cat_var"):
+            self.desc_cat_var.set(category)
+        self._current_desc_category = category
+        html, changed = self._resolve_desc_template_html(category, film, self._current_template_language)
         if changed:
             save_templates(self.templates)
+        self.desc_box.configure(state="normal")
         self.desc_box.delete("1.0", "end")
-        self.desc_box.insert("1.0", txt)
+        self.desc_box.insert("1.0", html)
+        self._last_desc_html = html
+        if hasattr(self, "desc_editor_btn"):
+            can_use_web_editor = webview is not None and DESC_EDITOR_ENTRY.exists()
+            self.desc_editor_btn.configure(state="normal" if can_use_web_editor else "disabled")
+
+    def _apply_desc_editor_result(self, category: str, film: str, docs: Dict[str, Dict[str, object]]):
+        descs_by_category = self.templates.setdefault("descriptions", {})
+        if not isinstance(descs_by_category, dict):
+            descs_by_category = {}
+            self.templates["descriptions"] = descs_by_category
+        film_map = descs_by_category.setdefault(category, {})
+        if not isinstance(film_map, dict):
+            film_map = {}
+            descs_by_category[category] = film_map
+        entry = film_map.get(film)
+        changed = False
+        for lang, doc in docs.items():
+            if not isinstance(doc, dict):
+                continue
+            html_value = doc.get("html")
+            if html_value is None:
+                continue
+            html_text = str(html_value).strip()
+            lang_code = lang if isinstance(lang, str) and lang else None
+            entry = _set_language_template_value(entry, lang_code, html_text, fallback_value="")
+            changed = True
+        if changed:
+            film_map[film] = entry
+            save_templates(self.templates)
+            self._load_desc_template()
+            show_info("Шаблон опису збережено.")
+
+    def _open_desc_editor(self):
+        category = getattr(self, "_current_desc_category", None) or GLOBAL_DESCRIPTION_KEY
+        film = self._selected_film_type_key()
+        language_codes = list(dict.fromkeys([code for code in ["uk", "ru", "en"] + self._template_language_codes() if code]))
+        if not language_codes:
+            language_codes = ["uk"]
+        docs: Dict[str, Dict[str, object]] = {}
+        for lang in language_codes:
+            html, _ = self._resolve_desc_template_html(category, film, lang)
+            docs[lang] = {
+                "lang": lang,
+                "html": html,
+                "css": "",
+                "assets": [],
+            }
+        active_lang = self._current_template_language or language_codes[0]
+        host = DescriptionEditorHost(docs, active_lang)
+        result = host.open()
+        if isinstance(result, dict) and result:
+            self._apply_desc_editor_result(category, film, result)
 
     def _save_desc_template(self):
-        category = self._current_template_category or self.desc_cat_var.get()
+        category = getattr(self, "_current_desc_category", None)
+        if not category or category == GLOBAL_DESCRIPTION_KEY:
+            template_category = getattr(self, "_current_template_category", None)
+            if template_category:
+                category = template_category
         if not category:
-            return show_error("Виберіть категорію для збереження опису.")
+            category = self.desc_cat_var.get()
+        if not category:
+            category = GLOBAL_DESCRIPTION_KEY
         film = self._selected_film_type_key()
         txt = self.desc_box.get("1.0", "end").strip()
         language_code = self._current_template_language
