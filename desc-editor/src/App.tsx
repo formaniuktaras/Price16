@@ -1,6 +1,15 @@
 import React, { useEffect, useImperativeHandle, useRef, useState } from 'react';
 import clsx from 'clsx';
-import { DescDoc, DescEditorRef, EditorProvider, buildStateFromDocs, toDescDoc, useEditorActions } from './core/state';
+import {
+  DescDoc,
+  DescEditorRef,
+  EditorProvider,
+  EditorState,
+  Lang,
+  buildStateFromDocs,
+  toDescDoc,
+  useEditorActions,
+} from './core/state';
 import VisualEditor from './editor/VisualEditor';
 import CodeEditor from './editor/CodeEditor';
 import PreviewPane from './editor/PreviewPane';
@@ -194,6 +203,7 @@ const AppShell = React.forwardRef<DescEditorRef, {}>((_, ref) => {
     updateHtml,
     updateCss,
     setAssets,
+    setMode,
   } = useEditorActions();
 
   useEffect(() => {
@@ -202,6 +212,36 @@ const AppShell = React.forwardRef<DescEditorRef, {}>((_, ref) => {
       replaceState(buildStateFromDocs(persisted.docs as Record<'uk' | 'ru' | 'en', DescDoc>, persisted.activeLang));
     }
   }, [replaceState]);
+
+  useEffect(() => {
+    const global = window as typeof window & { __DESC_EDITOR__?: Record<string, unknown> };
+    const host = (global.__DESC_EDITOR__ = global.__DESC_EDITOR__ || {});
+    host.setState = (payload: { activeLang?: Lang; docs?: Record<Lang, DescDoc> }) => {
+      if (!payload || !payload.docs) return;
+      const nextLang = (payload.activeLang ?? 'uk') as Lang;
+      replaceState(buildStateFromDocs(payload.docs as Record<Lang, DescDoc>, nextLang));
+    };
+    host.setLang = (lang: Lang) => setLang(lang);
+    host.setMode = (mode: EditorState['mode']) => setMode(mode);
+    return () => {
+      delete global.__DESC_EDITOR__;
+    };
+  }, [replaceState, setLang, setMode]);
+
+  useEffect(() => {
+    const global = window as typeof window & { __DESC_EDITOR__?: Record<string, unknown> };
+    const host = (global.__DESC_EDITOR__ = global.__DESC_EDITOR__ || {});
+    host.getState = () => {
+      const docs = (['uk', 'ru', 'en'] as const).reduce(
+        (acc, lang) => {
+          acc[lang] = toDescDoc(lang, state.docs[lang]);
+          return acc;
+        },
+        {} as Record<Lang, DescDoc>,
+      );
+      return JSON.stringify({ activeLang: state.activeLang, docs });
+    };
+  }, [state]);
 
   useImperativeHandle(ref, () => ({
     getValue: (lang = state.activeLang) => toDescDoc(lang, state.docs[lang]),

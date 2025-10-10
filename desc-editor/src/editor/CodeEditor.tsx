@@ -46,13 +46,14 @@ const CodeEditor: React.FC = () => {
       <div className="code-editor__pane">
         <Editor
           height="100%"
-          defaultLanguage={tab === 'html' ? 'html' : 'css'}
+          language={tab === 'html' ? 'html' : 'css'}
           value={tab === 'html' ? doc.html : doc.css}
-          theme="vs-dark"
+          theme="vs"
           options={{
             minimap: { enabled: false },
             fontSize: 14,
             automaticLayout: true,
+            scrollBeyondLastLine: false,
           }}
           onChange={handleChange}
         />
