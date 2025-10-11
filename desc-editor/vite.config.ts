@@ -1,9 +1,21 @@
-import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
+import { defineConfig, type PluginOption } from 'vite';
 
-export default defineConfig({
-  plugins: [react()],
-  server: {
-    port: 5173,
-  },
+const reactPluginPromise = import('@vitejs/plugin-react')
+  .then(({ default: react }) => react())
+  .catch(() => null);
+
+export default defineConfig(async () => {
+  const reactPlugin = await reactPluginPromise;
+  const plugins: PluginOption[] = [];
+
+  if (reactPlugin) {
+    plugins.push(reactPlugin);
+  }
+
+  return {
+    plugins,
+    server: {
+      port: 5173,
+    },
+  };
 });
