@@ -17,6 +17,59 @@ from formula_engine import FormulaEngine, FormulaError
 
 from database import collect_models, load_specs_map
 
+try:
+    from dateutil.relativedelta import relativedelta as _relativedelta
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    _relativedelta = None
+
+
+class _CallableDateTime(datetime):
+    """Datetime subclass that can be used both as value and callable."""
+
+    def __new__(cls, value, *args, **kwargs):
+        if isinstance(value, datetime) and not args and not kwargs:
+            base = value
+            extra = {}
+            if hasattr(base, "fold"):
+                extra["fold"] = getattr(base, "fold", 0)
+            return datetime.__new__(
+                cls,
+                base.year,
+                base.month,
+                base.day,
+                base.hour,
+                base.minute,
+                base.second,
+                base.microsecond,
+                tzinfo=base.tzinfo,
+                **extra,
+            )
+        return datetime.__new__(cls, value, *args, **kwargs)
+
+    def __call__(self):
+        kwargs = {}
+        if hasattr(self, "fold"):
+            kwargs["fold"] = getattr(self, "fold", 0)
+        return datetime(
+            self.year,
+            self.month,
+            self.day,
+            self.hour,
+            self.minute,
+            self.second,
+            self.microsecond,
+            tzinfo=self.tzinfo,
+            **kwargs,
+        )
+
+
+def _relativedelta_helper(*args, **kwargs):
+    if _relativedelta is None:
+        raise RuntimeError(
+            "Функція relativedelta недоступна. Встановіть пакет python-dateutil."
+        )
+    return _relativedelta(*args, **kwargs)
+
 APP_TITLE = "Prom Generator"
 
 
@@ -873,6 +926,9 @@ def _transliterate_ascii(value: str) -> str:
 def _build_formula_context(base_context):
     formula_context: Dict[str, object] = {}
     for key, value in base_context.items():
+        if isinstance(value, _CallableDateTime):
+            formula_context[key] = value()
+            continue
         if callable(value):
             continue
         formula_context[key] = value
@@ -980,6 +1036,7 @@ def generate_export_rows(
     field_template_cache = {}
     rows = []
     now_value = datetime.now()
+    now_for_context = _CallableDateTime(now_value)
 
     column_order = [field["field"] for field in enabled_fields]
 
@@ -1175,7 +1232,8 @@ def generate_export_rows(
                 "spec_items": spec_items,
                 "spec": spec_lookup,
                 "row_number": len(rows) + 1,
-                "now": now_value,
+                "now": now_for_context,
+                "now_value": now_value,
                 "language": None,
                 "selected_languages": tuple(selected_language_codes),
                 "titles_localized": dict(title_values),
@@ -1183,6 +1241,8 @@ def generate_export_rows(
                 "tags_localized": dict(tags_values),
                 "available_template_languages": tuple(template_language_codes),
             }
+
+            context["relativedelta"] = _relativedelta_helper
 
             for code, value in title_values.items():
                 suffix = _language_key_suffix(code)
