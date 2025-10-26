@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Literal, overload
 
 DB_FILE = "catalog.db"
 
@@ -19,8 +19,9 @@ def init_db() -> None:
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS categories(
-            id   INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
@@ -30,6 +31,7 @@ def init_db() -> None:
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             category_id INTEGER NOT NULL,
             name        TEXT NOT NULL,
+            created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(category_id, name),
             FOREIGN KEY(category_id) REFERENCES categories(id) ON DELETE CASCADE
         )
@@ -41,6 +43,7 @@ def init_db() -> None:
             id       INTEGER PRIMARY KEY AUTOINCREMENT,
             brand_id INTEGER NOT NULL,
             name     TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(brand_id, name),
             FOREIGN KEY(brand_id) REFERENCES brands(id) ON DELETE CASCADE
         )
@@ -59,6 +62,19 @@ def init_db() -> None:
     )
     conn.commit()
 
+    def ensure_created_at(table: str):
+        cur.execute(f"PRAGMA table_info({table})")
+        columns = {row[1] for row in cur.fetchall()}
+        if "created_at" not in columns:
+            cur.execute(
+                f"ALTER TABLE {table} ADD COLUMN created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
+            )
+            conn.commit()
+
+    ensure_created_at("categories")
+    ensure_created_at("brands")
+    ensure_created_at("models")
+
     cur.execute("SELECT COUNT(*) FROM categories")
     if cur.fetchone()[0] == 0:
         cur.executemany(
@@ -71,23 +87,41 @@ def init_db() -> None:
 
 # ---- CRUD helpers -----------------------------------------------------------------
 
-def _trimmed_rows(rows: Sequence[Sequence[object]]) -> List[Tuple[object, object]]:
-    trimmed: List[Tuple[object, object]] = []
+def _trimmed_rows(rows: Sequence[Sequence[object]]) -> List[Tuple[object, ...]]:
+    trimmed: List[Tuple[object, ...]] = []
     for row in rows:
+        if not row:
+            continue
+        idx = row[0]
+        name = row[1] if len(row) > 1 else None
+        if isinstance(name, str):
+            name = name.strip()
         if len(row) == 2:
-            idx, name = row
-            if isinstance(name, str):
-                name = name.strip()
             trimmed.append((idx, name))
+        elif len(row) >= 3:
+            trimmed.append((idx, name, *row[2:]))
         else:
             trimmed.append(tuple(row))
     return trimmed
 
 
-def get_categories() -> List[Tuple[int, str]]:
+@overload
+def get_categories(include_created: Literal[False] = False) -> List[Tuple[int, str]]:
+    ...
+
+
+@overload
+def get_categories(include_created: Literal[True]) -> List[Tuple[int, str, Optional[str]]]:
+    ...
+
+
+def get_categories(include_created: bool = False):
     conn = db_connect()
     cur = conn.cursor()
-    cur.execute("SELECT id, name FROM categories ORDER BY name")
+    if include_created:
+        cur.execute("SELECT id, name, created_at FROM categories ORDER BY name")
+    else:
+        cur.execute("SELECT id, name FROM categories ORDER BY name")
     rows = cur.fetchall()
     conn.close()
     return _trimmed_rows(rows)
@@ -129,13 +163,29 @@ def delete_category(cat_id: int) -> None:
     conn.close()
 
 
-def get_brands(category_id: int) -> List[Tuple[int, str]]:
+@overload
+def get_brands(category_id: int, include_created: Literal[False] = False) -> List[Tuple[int, str]]:
+    ...
+
+
+@overload
+def get_brands(category_id: int, include_created: Literal[True]) -> List[Tuple[int, str, Optional[str]]]:
+    ...
+
+
+def get_brands(category_id: int, include_created: bool = False):
     conn = db_connect()
     cur = conn.cursor()
-    cur.execute(
-        "SELECT id, name FROM brands WHERE category_id=? ORDER BY name",
-        (category_id,),
-    )
+    if include_created:
+        cur.execute(
+            "SELECT id, name, created_at FROM brands WHERE category_id=? ORDER BY name",
+            (category_id,),
+        )
+    else:
+        cur.execute(
+            "SELECT id, name FROM brands WHERE category_id=? ORDER BY name",
+            (category_id,),
+        )
     rows = cur.fetchall()
     conn.close()
     return _trimmed_rows(rows)
@@ -180,13 +230,29 @@ def delete_brand(brand_id: int) -> None:
     conn.close()
 
 
-def get_models(brand_id: int) -> List[Tuple[int, str]]:
+@overload
+def get_models(brand_id: int, include_created: Literal[False] = False) -> List[Tuple[int, str]]:
+    ...
+
+
+@overload
+def get_models(brand_id: int, include_created: Literal[True]) -> List[Tuple[int, str, Optional[str]]]:
+    ...
+
+
+def get_models(brand_id: int, include_created: bool = False):
     conn = db_connect()
     cur = conn.cursor()
-    cur.execute(
-        "SELECT id, name FROM models WHERE brand_id=? ORDER BY name",
-        (brand_id,),
-    )
+    if include_created:
+        cur.execute(
+            "SELECT id, name, created_at FROM models WHERE brand_id=? ORDER BY name",
+            (brand_id,),
+        )
+    else:
+        cur.execute(
+            "SELECT id, name FROM models WHERE brand_id=? ORDER BY name",
+            (brand_id,),
+        )
     rows = cur.fetchall()
     conn.close()
     return _trimmed_rows(rows)

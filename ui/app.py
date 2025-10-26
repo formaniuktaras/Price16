@@ -13,6 +13,7 @@ from copy import deepcopy
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from itertools import islice
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -1056,6 +1057,17 @@ class App(ctk.CTk):
         self._gen_tree_states = {}
         self._gen_tree_meta = {}
         self._gen_tree_labels = {}
+        self.gen_filter_header = None
+        self.gen_filter_panel = None
+        self.gen_filter_toggle = None
+        self.gen_filter_menu = None
+        self.gen_filter_clear = None
+        self.gen_filter_var = None
+        self._gen_filter_options: List[Tuple[str, str]] = []
+        self._gen_filter_label_to_key: Dict[str, str] = {}
+        self._gen_filter_key_to_label: Dict[str, str] = {}
+        self._gen_filter_default_label: Optional[str] = None
+        self._gen_filter_visible = False
         self._rename_clicks = {
             "cat": (None, 0.0),
             "brand": (None, 0.0),
@@ -3533,11 +3545,57 @@ class App(ctk.CTk):
     def _build_tab_generate(self):
         wrap = ctk.CTkFrame(self.tab_generate)
         wrap.pack(fill="both", expand=True, padx=10, pady=10)
-        
+
         left = ctk.CTkFrame(wrap)
         left.pack(side="left", fill="both", expand=True, padx=(0, 10), pady=10)
 
-        ctk.CTkLabel(left, text="Категорії / бренди / моделі").pack(anchor="w", padx=10, pady=(6, 4))
+        self.gen_filter_header = ctk.CTkFrame(left)
+        self.gen_filter_header.pack(fill="x", padx=10, pady=(6, 4))
+        ctk.CTkLabel(
+            self.gen_filter_header,
+            text="Категорії / бренди / моделі",
+        ).pack(side="left", padx=(0, 6))
+        self.gen_filter_toggle = ctk.CTkButton(
+            self.gen_filter_header,
+            text="Фільтр ▴",
+            width=90,
+            command=self._toggle_gen_filter_panel,
+        )
+        self.gen_filter_toggle.pack(side="right")
+
+        self.gen_filter_panel = ctk.CTkFrame(left)
+        self.gen_filter_panel.pack(fill="x", padx=10, pady=(0, 6))
+        ctk.CTkLabel(self.gen_filter_panel, text="Період:").pack(side="left", padx=(6, 6), pady=6)
+        self._gen_filter_options = [
+            ("Усі моделі", "all"),
+            ("Додані сьогодні", "today"),
+            ("Останні 24 години", "24h"),
+            ("Останні 7 днів", "7d"),
+            ("Останні 30 днів", "30d"),
+            ("Останні 90 днів", "90d"),
+        ]
+        self._gen_filter_label_to_key = {label: key for label, key in self._gen_filter_options}
+        self._gen_filter_key_to_label = {key: label for label, key in self._gen_filter_options}
+        self._gen_filter_default_label = self._gen_filter_options[0][0] if self._gen_filter_options else None
+        self.gen_filter_var = tk.StringVar(value=self._gen_filter_default_label or "")
+        self.gen_filter_menu = ctk.CTkOptionMenu(
+            self.gen_filter_panel,
+            values=[label for label, _ in self._gen_filter_options] or ["Усі моделі"],
+            variable=self.gen_filter_var,
+            width=200,
+            command=self._on_gen_filter_change,
+        )
+        self.gen_filter_menu.pack(side="left", fill="x", expand=True, padx=(0, 6), pady=6)
+        if self._gen_filter_default_label:
+            self.gen_filter_menu.set(self._gen_filter_default_label)
+        self.gen_filter_clear = ctk.CTkButton(
+            self.gen_filter_panel,
+            text="Скинути",
+            width=90,
+            command=self._reset_gen_filter,
+        )
+        self.gen_filter_clear.pack(side="left", padx=(0, 6), pady=6)
+        self._gen_filter_visible = True
 
         tree_container = ctk.CTkFrame(left)
         tree_container.pack(fill="both", expand=True, padx=10, pady=(0, 6))
@@ -3644,6 +3702,91 @@ class App(ctk.CTk):
 
         self._reload_gen_tree()
 
+    def _toggle_gen_filter_panel(self):
+        panel = getattr(self, "gen_filter_panel", None)
+        header = getattr(self, "gen_filter_header", None)
+        button = getattr(self, "gen_filter_toggle", None)
+        if panel is None or button is None or header is None:
+            return
+        if getattr(self, "_gen_filter_visible", False):
+            panel.pack_forget()
+            self._gen_filter_visible = False
+            button.configure(text="Фільтр ▾")
+        else:
+            panel.pack(fill="x", padx=10, pady=(0, 6), after=header)
+            self._gen_filter_visible = True
+            button.configure(text="Фільтр ▴")
+
+    def _reset_gen_filter(self):
+        default_label = getattr(self, "_gen_filter_default_label", None)
+        var = getattr(self, "gen_filter_var", None)
+        menu = getattr(self, "gen_filter_menu", None)
+        if not default_label or not isinstance(var, tk.StringVar):
+            return
+        if var.get() != default_label:
+            var.set(default_label)
+        if menu is not None:
+            menu.set(default_label)
+        self._reload_gen_tree()
+
+    def _on_gen_filter_change(self, _choice=None):
+        self._reload_gen_tree()
+
+    def _get_gen_filter_threshold(self) -> Optional[datetime]:
+        var = getattr(self, "gen_filter_var", None)
+        mapping = getattr(self, "_gen_filter_label_to_key", {})
+        if not isinstance(var, tk.StringVar) or not mapping:
+            return None
+        label = var.get()
+        key = mapping.get(label)
+        if not key or key == "all":
+            return None
+        now = datetime.now()
+        if key == "today":
+            return now.replace(hour=0, minute=0, second=0, microsecond=0)
+        if key.endswith("d"):
+            try:
+                days = int(key[:-1])
+            except ValueError:
+                return None
+            return now - timedelta(days=days)
+        if key.endswith("h"):
+            try:
+                hours = int(key[:-1])
+            except ValueError:
+                return None
+            return now - timedelta(hours=hours)
+        return None
+
+    def _parse_db_timestamp(self, raw: Optional[str]) -> Optional[datetime]:
+        if raw is None:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="ignore")
+        if not isinstance(raw, str):
+            raw = str(raw)
+        text = raw.strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text)
+        except ValueError:
+            pass
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+        return None
+
+    def _gen_filter_matches(self, created_at: Optional[str], threshold: Optional[datetime]) -> bool:
+        if threshold is None:
+            return True
+        created = self._parse_db_timestamp(created_at)
+        if created is None:
+            return False
+        return created >= threshold
+
     def _progress_reset(self, message: str = "Очікування"):
         bar = getattr(self, "progress_bar", None)
         if bar is None:
@@ -3724,28 +3867,92 @@ class App(ctk.CTk):
                 return ""
             return str(value)
 
-        for cat_id, cat_name in get_categories():
+        def _split_meta(row):
+            if not row:
+                return None, None, None
+            rid = row[0]
+            name = row[1] if len(row) > 1 else None
+            created = row[2] if len(row) > 2 else None
+            if isinstance(name, str):
+                name = name.strip()
+            if isinstance(created, str):
+                created = created.strip()
+            return rid, name, created
+
+        filter_threshold = self._get_gen_filter_threshold()
+
+        for cat_row in get_categories(include_created=True):
+            cat_id, cat_name, cat_created = _split_meta(cat_row)
+            if cat_id is None:
+                continue
             label = _clean_label(cat_name)
+            cat_matches = self._gen_filter_matches(cat_created, filter_threshold)
+            brand_nodes = []
+
+            for brand_row in get_brands(cat_id, include_created=True):
+                brand_id, brand_name, brand_created = _split_meta(brand_row)
+                if brand_id is None:
+                    continue
+                models_raw = []
+                for model_row in get_models(brand_id, include_created=True):
+                    model_id, model_name, model_created = _split_meta(model_row)
+                    if model_id is None:
+                        continue
+                    models_raw.append((model_id, model_name, model_created))
+                if filter_threshold is None:
+                    models_to_show = models_raw
+                else:
+                    models_to_show = [
+                        (mid, mname, mcreated)
+                        for mid, mname, mcreated in models_raw
+                        if self._gen_filter_matches(mcreated, filter_threshold)
+                    ]
+                brand_matches = self._gen_filter_matches(brand_created, filter_threshold)
+                if not models_to_show and not brand_matches:
+                    continue
+                brand_nodes.append((brand_id, brand_name, brand_created, models_to_show))
+
+            if not brand_nodes and not cat_matches:
+                continue
+
             cat_iid = f"cat_{cat_id}"
             self._gen_tree_labels[cat_iid] = label
             self._gen_tree_states[cat_iid] = 0
-            self._gen_tree_meta[cat_iid] = {"type": "category", "id": cat_id}
+            self._gen_tree_meta[cat_iid] = {
+                "type": "category",
+                "id": cat_id,
+                "created_at": cat_created,
+            }
             tree.insert("", "end", iid=cat_iid, text=f"{self._state_symbol(0)} {label}")
 
-            for brand_id, brand_name in get_brands(cat_id):
+            if not brand_nodes:
+                continue
+
+            for brand_id, brand_name, brand_created, models_to_show in brand_nodes:
                 b_label = _clean_label(brand_name)
                 brand_iid = f"brand_{brand_id}"
                 self._gen_tree_labels[brand_iid] = b_label
                 self._gen_tree_states[brand_iid] = 0
-                self._gen_tree_meta[brand_iid] = {"type": "brand", "id": brand_id, "category_id": cat_id}
+                self._gen_tree_meta[brand_iid] = {
+                    "type": "brand",
+                    "id": brand_id,
+                    "category_id": cat_id,
+                    "created_at": brand_created,
+                }
                 tree.insert(cat_iid, "end", iid=brand_iid, text=f"{self._state_symbol(0)} {b_label}")
 
-                for model_id, model_name in get_models(brand_id):
+                for model_id, model_name, model_created in models_to_show:
                     m_label = _clean_label(model_name)
                     model_iid = f"model_{model_id}"
                     self._gen_tree_labels[model_iid] = m_label
                     self._gen_tree_states[model_iid] = 0
-                    self._gen_tree_meta[model_iid] = {"type": "model", "id": model_id, "brand_id": brand_id, "category_id": cat_id}
+                    self._gen_tree_meta[model_iid] = {
+                        "type": "model",
+                        "id": model_id,
+                        "brand_id": brand_id,
+                        "category_id": cat_id,
+                        "created_at": model_created,
+                    }
                     tree.insert(brand_iid, "end", iid=model_iid, text=f"{self._state_symbol(0)} {m_label}")
 
         if not prev_open:
