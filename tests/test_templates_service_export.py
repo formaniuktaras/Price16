@@ -1,5 +1,6 @@
 import sys
 import types
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -105,3 +106,27 @@ def test_export_products_folder_preparation_failure(monkeypatch, tmp_path):
 
     assert excinfo.value.code == ts.EXPORT_ERR_FOLDER_PREP
     assert "підготувати теку" in excinfo.value.message
+
+
+def test_callable_datetime_behaves_like_datetime_operations():
+    base = datetime(2024, 1, 15, 8, 30, 45)
+    wrapped = ts._CallableDateTime(base)
+
+    assert isinstance(wrapped, datetime)
+    assert wrapped.year == base.year
+    assert wrapped.strftime("%Y-%m-%d %H:%M:%S") == base.strftime("%Y-%m-%d %H:%M:%S")
+    assert wrapped.replace(day=1).day == 1
+    assert wrapped + timedelta(days=2) == base + timedelta(days=2)
+    assert wrapped() == base
+
+
+def test_callable_datetime_callable_result_supports_relativedelta():
+    if ts._relativedelta is None:
+        pytest.skip("relativedelta helper unavailable")
+
+    base = datetime(2023, 1, 10, 12, 0, 0)
+    wrapped = ts._CallableDateTime(base)
+    result = wrapped().replace(day=1) + ts._relativedelta_helper(months=1, days=-1)
+
+    expected = base.replace(day=1) + ts._relativedelta_helper(months=1, days=-1)
+    assert result == expected
