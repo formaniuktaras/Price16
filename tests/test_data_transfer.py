@@ -78,10 +78,38 @@ def test_export_all_data_to_excel(monkeypatch, tmp_path):
 
     filename = tmp_path / "backup.xlsx"
     templates = {
+        "title_template": "{{ title }}",
+        "tags_template": "{{ tags }}",
+        "descriptions": {
+            "Cat": {
+                "прозора": {
+                    "default": "Опис укр",
+                    "languages": {"en": "Description en"},
+                }
+            }
+        },
         "template_languages": [{"code": "uk", "label": "Українська"}],
         "film_types": [{"name": "прозора", "enabled": True}],
     }
-    title_tags = {"default": {}}
+    title_tags = {
+        "default": {
+            "title_template": {"default": "{{ title }}", "languages": {"en": "Title EN"}},
+            "tags_template": {"default": "{{ tags }}"},
+        },
+        "by_film": {
+            "прозора": {
+                "title_template": {"default": "Film title"},
+                "tags_template": {"default": "Film tags", "languages": {"uk": "Плівка теги"}},
+            }
+        },
+        "by_category": {
+            "Cat": {
+                "default": {
+                    "title_template": {"default": "Cat title"},
+                }
+            }
+        },
+    }
     export_fields = [
         {"field": "Назва", "template": "{{ title }}", "enabled": True, "languages": ["uk", "en"]}
     ]
@@ -95,6 +123,45 @@ def test_export_all_data_to_excel(monkeypatch, tmp_path):
     assert wb.sheets["Параметри"].rows[1][0] == "language"
     assert wb.sheets["Параметри"].rows[2][0] == "film_type"
     assert wb.sheets["Експортні поля"].rows[1][4] == "uk, en"
+
+    templates_sheet = wb.sheets["Шаблони"].rows
+    assert templates_sheet[0] == (
+        "Група",
+        "Сценарій",
+        "Поле",
+        "Категорія",
+        "Тип плівки",
+        "Мова",
+        "Значення",
+    )
+    assert ("templates", "global", "title_template", "", "", "", "{{ title }}") in templates_sheet
+    assert (
+        "templates",
+        "description_language",
+        "description",
+        "Cat",
+        "прозора",
+        "en",
+        "Description en",
+    ) in templates_sheet
+    assert (
+        "title_tags",
+        "film_language",
+        "tags_template",
+        "",
+        "прозора",
+        "uk",
+        "Плівка теги",
+    ) in templates_sheet
+    assert (
+        "title_tags",
+        "category_default",
+        "title_template",
+        "Cat",
+        "",
+        "",
+        "Cat title",
+    ) in templates_sheet
 
 
 class LoadedSheet:
@@ -141,9 +208,72 @@ def test_import_all_data_from_excel(monkeypatch):
             ("film_type", "", "прозора", "1"),
         ],
         "Шаблони": [
-            ("Ключ", "Дані (JSON)"),
-            ("templates", "{\"title_template\": \"{{ title }}\"}"),
-            ("title_tags_templates", "{\"default\": {}}"),
+            (
+                "Група",
+                "Сценарій",
+                "Поле",
+                "Категорія",
+                "Тип плівки",
+                "Мова",
+                "Значення",
+            ),
+            ("templates", "global", "title_template", "", "", "", "{{ title }}"),
+            ("templates", "global", "tags_template", "", "", "", "{{ tags }}"),
+            ("templates", "description_default", "description", "Cat", "прозора", "", "Опис"),
+            (
+                "templates",
+                "description_language",
+                "description",
+                "Cat",
+                "прозора",
+                "en",
+                "Description EN",
+            ),
+            (
+                "title_tags",
+                "default",
+                "title_template",
+                "",
+                "",
+                "",
+                "{{ title }}",
+            ),
+            (
+                "title_tags",
+                "default_language",
+                "title_template",
+                "",
+                "",
+                "en",
+                "Title EN",
+            ),
+            (
+                "title_tags",
+                "film",
+                "tags_template",
+                "",
+                "прозора",
+                "",
+                "Film tags",
+            ),
+            (
+                "title_tags",
+                "film_language",
+                "tags_template",
+                "",
+                "прозора",
+                "uk",
+                "Плівка теги",
+            ),
+            (
+                "title_tags",
+                "category_default",
+                "title_template",
+                "Cat",
+                "",
+                "",
+                "Cat title",
+            ),
         ],
         "Експортні поля": [
             ("Позиція", "Поле", "Шаблон", "Увімкнено", "Мови"),
@@ -181,9 +311,22 @@ def test_import_all_data_from_excel(monkeypatch):
     result = dt.import_all_data_from_excel("dummy.xlsx")
 
     assert captured["catalog"]["categories"][0]["name"] == "Cat"
+    assert saved_templates["data"]["title_template"] == "{{ title }}"
+    assert (
+        saved_templates["data"]["descriptions"]["Cat"]["прозора"]["languages"]["en"]
+        == "Description EN"
+    )
     assert saved_templates["data"]["template_languages"][0]["code"] == "uk"
     assert saved_templates["data"]["film_types"][0]["name"] == "прозора"
-    assert saved_title_tags["data"] == {"default": {}}
+    assert saved_title_tags["data"]["default"]["title_template"]["languages"]["en"] == "Title EN"
+    assert (
+        saved_title_tags["data"]["by_film"]["прозора"]["tags_template"]["languages"]["uk"]
+        == "Плівка теги"
+    )
+    assert (
+        saved_title_tags["data"]["by_category"]["Cat"]["default"]["title_template"]["default"]
+        == "Cat title"
+    )
     assert saved_export_fields["data"][0]["field"] == "Назва"
     assert result == {
         "templates": {"loaded": True},

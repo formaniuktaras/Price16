@@ -165,9 +165,264 @@ def export_all_data_to_excel(
     sheets["Параметри"] = sheet
 
     sheet = workbook.create_sheet("Шаблони")
-    sheet.append(["Ключ", "Дані (JSON)"])
-    sheet.append(["templates", json.dumps(templates, ensure_ascii=False, indent=2)])
-    sheet.append(["title_tags_templates", json.dumps(title_tags, ensure_ascii=False, indent=2)])
+    sheet.append([
+        "Група",
+        "Сценарій",
+        "Поле",
+        "Категорія",
+        "Тип плівки",
+        "Мова",
+        "Значення",
+    ])
+
+    def as_text(value: object) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        return str(value)
+
+    templates_dict = templates if isinstance(templates, dict) else {}
+    title_template_value = as_text(templates_dict.get("title_template"))
+    tags_template_value = as_text(templates_dict.get("tags_template"))
+    sheet.append([
+        "templates",
+        "global",
+        "title_template",
+        "",
+        "",
+        "",
+        title_template_value,
+    ])
+    sheet.append([
+        "templates",
+        "global",
+        "tags_template",
+        "",
+        "",
+        "",
+        tags_template_value,
+    ])
+
+    descriptions = templates_dict.get("descriptions")
+    if isinstance(descriptions, dict):
+        for category, films in descriptions.items():
+            if not isinstance(films, dict):
+                continue
+            category_name = as_text(category)
+            for film_type, payload in films.items():
+                if not isinstance(payload, dict):
+                    continue
+                film_name = as_text(film_type)
+                default_text = as_text(payload.get("default"))
+                sheet.append([
+                    "templates",
+                    "description_default",
+                    "description",
+                    category_name,
+                    film_name,
+                    "",
+                    default_text,
+                ])
+                languages = payload.get("languages")
+                if isinstance(languages, dict):
+                    for code, text in languages.items():
+                        code_value = as_text(code)
+                        if not code_value:
+                            continue
+                        sheet.append([
+                            "templates",
+                            "description_language",
+                            "description",
+                            category_name,
+                            film_name,
+                            code_value,
+                            as_text(text),
+                        ])
+
+    def append_row(
+        group: str,
+        scenario: str,
+        field: str,
+        category: str,
+        film: str,
+        language: str,
+        value: object,
+    ) -> None:
+        sheet.append([
+            group,
+            scenario,
+            field,
+            category,
+            film,
+            language,
+            as_text(value),
+        ])
+
+    def append_title_tags_entry(
+        scenario: str,
+        field: str,
+        category: str,
+        film: str,
+        language: str,
+        value: object,
+    ) -> None:
+        append_row("title_tags", scenario, field, category, film, language, value)
+
+    def iter_template_entry(entry: object):
+        default_value = None
+        languages_dict: Dict[str, object] = {}
+        if isinstance(entry, dict):
+            default_value = entry.get("default")
+            languages_raw = entry.get("languages")
+            if isinstance(languages_raw, dict):
+                for code, text in languages_raw.items():
+                    code_str = as_text(code).strip()
+                    if not code_str:
+                        continue
+                    languages_dict[code_str] = text
+        elif entry is not None:
+            default_value = entry
+        return default_value, languages_dict
+
+    title_tags_dict = title_tags if isinstance(title_tags, dict) else {}
+    default_block = title_tags_dict.get("default")
+    if isinstance(default_block, dict):
+        for field_name in ("title_template", "tags_template"):
+            default_value, languages_map = iter_template_entry(default_block.get(field_name))
+            append_title_tags_entry("default", field_name, "", "", "", default_value)
+            for code, text in languages_map.items():
+                code_value = as_text(code)
+                if not code_value:
+                    continue
+                append_title_tags_entry(
+                    "default_language",
+                    field_name,
+                    "",
+                    "",
+                    code_value,
+                    text,
+                )
+
+    by_film_block = title_tags_dict.get("by_film")
+    if isinstance(by_film_block, dict):
+        for film_type, payload in by_film_block.items():
+            if not isinstance(payload, dict):
+                continue
+            film_name = as_text(film_type)
+            for field_name in ("title_template", "tags_template"):
+                default_value, languages_map = iter_template_entry(payload.get(field_name))
+                append_title_tags_entry("film", field_name, "", film_name, "", default_value)
+                for code, text in languages_map.items():
+                    code_value = as_text(code)
+                    if not code_value:
+                        continue
+                    append_title_tags_entry(
+                        "film_language",
+                        field_name,
+                        "",
+                        film_name,
+                        code_value,
+                        text,
+                    )
+
+    by_category_block = title_tags_dict.get("by_category")
+    if isinstance(by_category_block, dict):
+        for category, payload in by_category_block.items():
+            if not isinstance(payload, dict):
+                continue
+            category_name = as_text(category)
+            category_default = payload.get("default")
+            if isinstance(category_default, dict):
+                for field_name in ("title_template", "tags_template"):
+                    default_value, languages_map = iter_template_entry(
+                        category_default.get(field_name)
+                    )
+                    append_title_tags_entry(
+                        "category_default",
+                        field_name,
+                        category_name,
+                        "",
+                        "",
+                        default_value,
+                    )
+                    for code, text in languages_map.items():
+                        code_value = as_text(code)
+                        if not code_value:
+                            continue
+                        append_title_tags_entry(
+                            "category_default_language",
+                            field_name,
+                            category_name,
+                            "",
+                            code_value,
+                            text,
+                        )
+            category_by_film = payload.get("by_film")
+            if isinstance(category_by_film, dict):
+                for film_type, film_payload in category_by_film.items():
+                    if not isinstance(film_payload, dict):
+                        continue
+                    film_name = as_text(film_type)
+                    for field_name in ("title_template", "tags_template"):
+                        default_value, languages_map = iter_template_entry(
+                            film_payload.get(field_name)
+                        )
+                        append_title_tags_entry(
+                            "category_film",
+                            field_name,
+                            category_name,
+                            film_name,
+                            "",
+                            default_value,
+                        )
+                        for code, text in languages_map.items():
+                            code_value = as_text(code)
+                            if not code_value:
+                                continue
+                            append_title_tags_entry(
+                                "category_film_language",
+                                field_name,
+                                category_name,
+                                film_name,
+                                code_value,
+                                text,
+                            )
+
+    known_template_keys = {
+        "title_template",
+        "tags_template",
+        "descriptions",
+        "template_languages",
+        "film_types",
+    }
+    for key, value in templates_dict.items():
+        if key in known_template_keys:
+            continue
+        append_row(
+            "templates",
+            "raw_json",
+            key,
+            "",
+            "",
+            "",
+            json.dumps(value, ensure_ascii=False, indent=2),
+        )
+
+    known_title_tag_keys = {"default", "by_film", "by_category"}
+    for key, value in title_tags_dict.items():
+        if key in known_title_tag_keys:
+            continue
+        append_row(
+            "title_tags",
+            "raw_json",
+            key,
+            "",
+            "",
+            "",
+            json.dumps(value, ensure_ascii=False, indent=2),
+        )
+
     sheets["Шаблони"] = sheet
 
     sheet = workbook.create_sheet("Експортні поля")
@@ -259,22 +514,38 @@ def _parse_parameters_sheet(sheet) -> Tuple[List[Dict[str, object]], List[Dict[s
 
 
 def _parse_templates_sheet(sheet) -> Tuple[Optional[Dict[str, object]], Optional[Dict[str, object]]]:
-    templates_data = None
-    title_tags_data = None
+    templates_data: Optional[Dict[str, object]] = None
+    title_tags_data: Optional[Dict[str, object]] = None
     if sheet is None:
         return templates_data, title_tags_data
 
-    rows = getattr(sheet, "iter_rows", None)
-    if rows is None:
+    rows_iter = getattr(sheet, "iter_rows", None)
+    if rows_iter is None:
         return templates_data, title_tags_data
 
-    for row in sheet.iter_rows(min_row=2, values_only=True):
+    rows = [tuple(row) for row in sheet.iter_rows(min_row=2, values_only=True)]
+
+    def is_new_format(row: Tuple[object, ...]) -> bool:
+        if not row:
+            return False
+        if len(row) >= 4 and isinstance(row[0], str):
+            return True
+        return False
+
+    if not rows:
+        return templates_data, title_tags_data
+
+    if any(is_new_format(row) for row in rows):
+        return _parse_templates_sheet_new(rows)
+
+    # Fallback to legacy JSON-based format for backwards compatibility
+    for row in rows:
         if not row:
             continue
         key = row[0]
         if not isinstance(key, str):
             continue
-        payload = row[1]
+        payload = row[1] if len(row) > 1 else None
         if not isinstance(payload, str):
             continue
         try:
@@ -294,6 +565,231 @@ def _parse_templates_sheet(sheet) -> Tuple[Optional[Dict[str, object]], Optional
             title_tags_data = data
 
     return templates_data, title_tags_data
+
+
+def _parse_templates_sheet_new(
+    rows: List[Tuple[object, ...]]
+) -> Tuple[Optional[Dict[str, object]], Optional[Dict[str, object]]]:
+    templates_result: Dict[str, object] = {}
+    descriptions: Dict[str, Dict[str, Dict[str, object]]] = {}
+
+    title_tags_default: Dict[str, Dict[str, object]] = {}
+    title_tags_by_film: Dict[str, Dict[str, Dict[str, object]]] = {}
+    title_tags_by_category: Dict[str, Dict[str, object]] = {}
+    extra_title_tags: Dict[str, object] = {}
+
+    def cell_to_key(value: object, *, lower: bool = False) -> str:
+        if value is None:
+            return ""
+        text = str(value).strip()
+        return text.lower() if lower else text
+
+    def value_text(value: object) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        return str(value)
+
+    def ensure_description(category: str, film: str) -> Dict[str, object]:
+        category_map = descriptions.setdefault(category, {})
+        film_entry = category_map.setdefault(film, {})
+        languages = film_entry.get("languages")
+        if not isinstance(languages, dict):
+            languages = {}
+        film_entry["languages"] = languages
+        return film_entry
+
+    def ensure_template_entry(container: Dict[str, Dict[str, object]], field: str) -> Dict[str, object]:
+        entry = container.get(field)
+        if not isinstance(entry, dict):
+            entry = {}
+        languages = entry.get("languages")
+        if not isinstance(languages, dict):
+            languages = {}
+        entry["languages"] = languages
+        container[field] = entry
+        return entry
+
+    for row in rows:
+        if not row:
+            continue
+        group = cell_to_key(row[0], lower=True)
+        if not group:
+            continue
+        scenario = cell_to_key(row[1] if len(row) > 1 else "", lower=True)
+        field = cell_to_key(row[2] if len(row) > 2 else "")
+        category = cell_to_key(row[3] if len(row) > 3 else "")
+        film = cell_to_key(row[4] if len(row) > 4 else "")
+        language = cell_to_key(row[5] if len(row) > 5 else "")
+        raw_value = row[6] if len(row) > 6 else ""
+        text_value = value_text(raw_value)
+
+        if group == "templates":
+            if scenario == "global":
+                if field:
+                    templates_result[field] = text_value
+            elif scenario == "description_default":
+                if category and film:
+                    entry = ensure_description(category, film)
+                    entry["default"] = text_value
+            elif scenario == "description_language":
+                if category and film and language:
+                    entry = ensure_description(category, film)
+                    languages_map = entry.setdefault("languages", {})
+                    languages_map[language] = text_value
+            elif scenario == "raw_json":
+                if not field:
+                    continue
+                payload = text_value.strip()
+                if not payload:
+                    templates_result[field] = None
+                else:
+                    try:
+                        templates_result[field] = json.loads(payload)
+                    except json.JSONDecodeError as exc:
+                        raise DataTransferError(
+                            DATA_ERR_VALIDATION,
+                            f"Некоректний JSON у полі '{field}' (група 'templates'): {exc}",
+                        ) from exc
+            else:
+                if field:
+                    templates_result[field] = text_value
+        elif group == "title_tags":
+            if scenario == "default":
+                if field:
+                    entry = ensure_template_entry(title_tags_default, field)
+                    entry["default"] = text_value
+            elif scenario == "default_language":
+                if field and language:
+                    entry = ensure_template_entry(title_tags_default, field)
+                    entry.setdefault("languages", {})[language] = text_value
+            elif scenario == "film":
+                if field and film:
+                    film_entry = ensure_template_entry(
+                        title_tags_by_film.setdefault(film, {}), field
+                    )
+                    film_entry["default"] = text_value
+            elif scenario == "film_language":
+                if field and film and language:
+                    film_entry = ensure_template_entry(
+                        title_tags_by_film.setdefault(film, {}), field
+                    )
+                    film_entry.setdefault("languages", {})[language] = text_value
+            elif scenario == "category_default":
+                if field and category:
+                    container = ensure_template_entry(
+                        title_tags_by_category.setdefault(category, {}).setdefault(
+                            "default", {}
+                        ),
+                        field,
+                    )
+                    container["default"] = text_value
+            elif scenario == "category_default_language":
+                if field and category and language:
+                    container = ensure_template_entry(
+                        title_tags_by_category.setdefault(category, {}).setdefault(
+                            "default", {}
+                        ),
+                        field,
+                    )
+                    container.setdefault("languages", {})[language] = text_value
+            elif scenario == "category_film":
+                if field and category and film:
+                    container = ensure_template_entry(
+                        title_tags_by_category.setdefault(category, {})
+                        .setdefault("by_film", {})
+                        .setdefault(film, {}),
+                        field,
+                    )
+                    container["default"] = text_value
+            elif scenario == "category_film_language":
+                if field and category and film and language:
+                    container = ensure_template_entry(
+                        title_tags_by_category.setdefault(category, {})
+                        .setdefault("by_film", {})
+                        .setdefault(film, {}),
+                        field,
+                    )
+                    container.setdefault("languages", {})[language] = text_value
+            elif scenario == "raw_json":
+                if not field:
+                    continue
+                payload = text_value.strip()
+                if not payload:
+                    extra_title_tags[field] = None
+                else:
+                    try:
+                        extra_title_tags[field] = json.loads(payload)
+                    except json.JSONDecodeError as exc:
+                        raise DataTransferError(
+                            DATA_ERR_VALIDATION,
+                            f"Некоректний JSON у полі '{field}' (група 'title_tags'): {exc}",
+                        ) from exc
+
+    if descriptions:
+        templates_result["descriptions"] = descriptions
+
+    def clean_template_holder(holder: Dict[str, Dict[str, object]]) -> Dict[str, Dict[str, object]]:
+        cleaned: Dict[str, Dict[str, object]] = {}
+        for field, data in holder.items():
+            if not isinstance(data, dict):
+                continue
+            entry: Dict[str, object] = {}
+            if "default" in data:
+                entry["default"] = data.get("default", "")
+            languages_map = data.get("languages")
+            if isinstance(languages_map, dict):
+                entry["languages"] = dict(languages_map)
+            elif "languages" in data:
+                entry["languages"] = {}
+            if entry:
+                cleaned[field] = entry
+        return cleaned
+
+    title_tags_result: Dict[str, object] = {}
+    if title_tags_default:
+        cleaned_default = clean_template_holder(title_tags_default)
+        if cleaned_default:
+            title_tags_result["default"] = cleaned_default
+    if title_tags_by_film:
+        cleaned_by_film: Dict[str, Dict[str, object]] = {}
+        for film, holder in title_tags_by_film.items():
+            cleaned_holder = clean_template_holder(holder)
+            if cleaned_holder:
+                cleaned_by_film[film] = cleaned_holder
+        if cleaned_by_film:
+            title_tags_result["by_film"] = cleaned_by_film
+    if title_tags_by_category:
+        cleaned_by_category: Dict[str, Dict[str, object]] = {}
+        for category, payload in title_tags_by_category.items():
+            cleaned_category: Dict[str, object] = {}
+            default_block = payload.get("default")
+            if isinstance(default_block, dict):
+                cleaned_default = clean_template_holder(default_block)
+                if cleaned_default:
+                    cleaned_category["default"] = cleaned_default
+            by_film_block = payload.get("by_film")
+            if isinstance(by_film_block, dict):
+                cleaned_nested: Dict[str, Dict[str, object]] = {}
+                for film, holder in by_film_block.items():
+                    cleaned_holder = clean_template_holder(holder)
+                    if cleaned_holder:
+                        cleaned_nested[film] = cleaned_holder
+                if cleaned_nested:
+                    cleaned_category["by_film"] = cleaned_nested
+            if cleaned_category:
+                cleaned_by_category[category] = cleaned_category
+        if cleaned_by_category:
+            title_tags_result["by_category"] = cleaned_by_category
+
+    if extra_title_tags:
+        for key, value in extra_title_tags.items():
+            title_tags_result[key] = value
+
+    templates_payload = templates_result if templates_result else None
+    title_tags_payload = title_tags_result if title_tags_result else None
+    return templates_payload, title_tags_payload
 
 
 def _parse_export_fields_sheet(sheet) -> List[Dict[str, object]]:
