@@ -13,9 +13,9 @@ from copy import deepcopy
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from itertools import islice
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, cast
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -1060,13 +1060,17 @@ class App(ctk.CTk):
         self.gen_filter_header = None
         self.gen_filter_panel = None
         self.gen_filter_toggle = None
-        self.gen_filter_menu = None
         self.gen_filter_clear = None
-        self.gen_filter_var = None
-        self._gen_filter_options: List[Tuple[str, str]] = []
-        self._gen_filter_label_to_key: Dict[str, str] = {}
-        self._gen_filter_key_to_label: Dict[str, str] = {}
-        self._gen_filter_default_label: Optional[str] = None
+        self.gen_filter_start_date_var = None
+        self.gen_filter_start_time_var = None
+        self.gen_filter_end_date_var = None
+        self.gen_filter_end_time_var = None
+        self.gen_filter_start_date_entry = None
+        self.gen_filter_start_time_entry = None
+        self.gen_filter_end_date_entry = None
+        self.gen_filter_end_time_entry = None
+        self.gen_filter_apply = None
+        self._gen_filter_range: Tuple[Optional[datetime], Optional[datetime]] = (None, None)
         self._gen_filter_visible = False
         self._rename_clicks = {
             "cat": (None, 0.0),
@@ -3566,28 +3570,61 @@ class App(ctk.CTk):
         self.gen_filter_panel = ctk.CTkFrame(left)
         self.gen_filter_panel.pack(fill="x", padx=10, pady=(0, 6))
         ctk.CTkLabel(self.gen_filter_panel, text="Період:").pack(side="left", padx=(6, 6), pady=6)
-        self._gen_filter_options = [
-            ("Усі моделі", "all"),
-            ("Додані сьогодні", "today"),
-            ("Останні 24 години", "24h"),
-            ("Останні 7 днів", "7d"),
-            ("Останні 30 днів", "30d"),
-            ("Останні 90 днів", "90d"),
-        ]
-        self._gen_filter_label_to_key = {label: key for label, key in self._gen_filter_options}
-        self._gen_filter_key_to_label = {key: label for label, key in self._gen_filter_options}
-        self._gen_filter_default_label = self._gen_filter_options[0][0] if self._gen_filter_options else None
-        self.gen_filter_var = tk.StringVar(value=self._gen_filter_default_label or "")
-        self.gen_filter_menu = ctk.CTkOptionMenu(
-            self.gen_filter_panel,
-            values=[label for label, _ in self._gen_filter_options] or ["Усі моделі"],
-            variable=self.gen_filter_var,
-            width=200,
-            command=self._on_gen_filter_change,
+        fields_frame = ctk.CTkFrame(self.gen_filter_panel)
+        fields_frame.pack(side="left", fill="x", expand=True, padx=(0, 6), pady=6)
+
+        self.gen_filter_start_date_var = tk.StringVar(value="")
+        self.gen_filter_start_time_var = tk.StringVar(value="")
+        self.gen_filter_end_date_var = tk.StringVar(value="")
+        self.gen_filter_end_time_var = tk.StringVar(value="")
+
+        ctk.CTkLabel(fields_frame, text="з").pack(side="left", padx=(0, 4))
+        self.gen_filter_start_date_entry = ctk.CTkEntry(
+            fields_frame,
+            width=110,
+            textvariable=self.gen_filter_start_date_var,
+            placeholder_text="дд.мм.рррр",
         )
-        self.gen_filter_menu.pack(side="left", fill="x", expand=True, padx=(0, 6), pady=6)
-        if self._gen_filter_default_label:
-            self.gen_filter_menu.set(self._gen_filter_default_label)
+        self.gen_filter_start_date_entry.pack(side="left", padx=(0, 4))
+        self.gen_filter_start_time_entry = ctk.CTkEntry(
+            fields_frame,
+            width=80,
+            textvariable=self.gen_filter_start_time_var,
+            placeholder_text="гг.хх",
+        )
+        self.gen_filter_start_time_entry.pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(fields_frame, text="по").pack(side="left", padx=(0, 4))
+        self.gen_filter_end_date_entry = ctk.CTkEntry(
+            fields_frame,
+            width=110,
+            textvariable=self.gen_filter_end_date_var,
+            placeholder_text="дд.мм.рррр",
+        )
+        self.gen_filter_end_date_entry.pack(side="left", padx=(0, 4))
+        self.gen_filter_end_time_entry = ctk.CTkEntry(
+            fields_frame,
+            width=80,
+            textvariable=self.gen_filter_end_time_var,
+            placeholder_text="гг.хх",
+        )
+        self.gen_filter_end_time_entry.pack(side="left", padx=(0, 4))
+
+        for entry in (
+            self.gen_filter_start_date_entry,
+            self.gen_filter_start_time_entry,
+            self.gen_filter_end_date_entry,
+            self.gen_filter_end_time_entry,
+        ):
+            if entry is not None:
+                entry.bind("<Return>", self._on_gen_filter_entry_submit)
+
+        self.gen_filter_apply = ctk.CTkButton(
+            self.gen_filter_panel,
+            text="Застосувати",
+            width=110,
+            command=self._apply_gen_filter_range,
+        )
+        self.gen_filter_apply.pack(side="left", padx=(0, 6), pady=6)
         self.gen_filter_clear = ctk.CTkButton(
             self.gen_filter_panel,
             text="Скинути",
@@ -3718,45 +3755,72 @@ class App(ctk.CTk):
             button.configure(text="Фільтр ▴")
 
     def _reset_gen_filter(self):
-        default_label = getattr(self, "_gen_filter_default_label", None)
-        var = getattr(self, "gen_filter_var", None)
-        menu = getattr(self, "gen_filter_menu", None)
-        if not default_label or not isinstance(var, tk.StringVar):
+        for var in (
+            getattr(self, "gen_filter_start_date_var", None),
+            getattr(self, "gen_filter_start_time_var", None),
+            getattr(self, "gen_filter_end_date_var", None),
+            getattr(self, "gen_filter_end_time_var", None),
+        ):
+            if isinstance(var, tk.StringVar):
+                var.set("")
+        self._gen_filter_range = (None, None)
+        self._reload_gen_tree()
+
+    def _on_gen_filter_entry_submit(self, _event=None):
+        self._apply_gen_filter_range()
+
+    def _parse_gen_filter_datetime(self, date_var, time_var, label: str) -> Optional[datetime]:
+        date_text = ""
+        time_text = ""
+        if isinstance(date_var, tk.StringVar):
+            date_text = date_var.get().strip()
+        if isinstance(time_var, tk.StringVar):
+            time_text = time_var.get().strip()
+        if not date_text and not time_text:
+            return None
+        if not date_text or not time_text:
+            raise ValueError(f"Вкажіть повну дату і час для поля '{label}'.")
+        normalized_time = time_text.replace(" ", "")
+        if ":" not in normalized_time and "." in normalized_time:
+            normalized_time = normalized_time.replace(".", ":")
+        candidate = f"{date_text} {normalized_time}"
+        for fmt in ("%d.%m.%Y %H:%M", "%d.%m.%Y %H.%M"):
+            try:
+                return datetime.strptime(candidate, fmt)
+            except ValueError:
+                continue
+        raise ValueError(
+            f"Невірний формат для поля '{label}'. Використовуйте 'дд.мм.рррр' та 'гг.хх'."
+        )
+
+    def _apply_gen_filter_range(self):
+        try:
+            start = self._parse_gen_filter_datetime(
+                getattr(self, "gen_filter_start_date_var", None),
+                getattr(self, "gen_filter_start_time_var", None),
+                "Початок",
+            )
+            end = self._parse_gen_filter_datetime(
+                getattr(self, "gen_filter_end_date_var", None),
+                getattr(self, "gen_filter_end_time_var", None),
+                "Кінець",
+            )
+        except ValueError as exc:
+            show_error(str(exc))
             return
-        if var.get() != default_label:
-            var.set(default_label)
-        if menu is not None:
-            menu.set(default_label)
+
+        if start is not None and end is not None and start > end:
+            show_error("Дата початку не може бути пізнішою за дату завершення.")
+            return
+
+        self._gen_filter_range = (start, end)
         self._reload_gen_tree()
 
-    def _on_gen_filter_change(self, _choice=None):
-        self._reload_gen_tree()
-
-    def _get_gen_filter_threshold(self) -> Optional[datetime]:
-        var = getattr(self, "gen_filter_var", None)
-        mapping = getattr(self, "_gen_filter_label_to_key", {})
-        if not isinstance(var, tk.StringVar) or not mapping:
-            return None
-        label = var.get()
-        key = mapping.get(label)
-        if not key or key == "all":
-            return None
-        now = datetime.now()
-        if key == "today":
-            return now.replace(hour=0, minute=0, second=0, microsecond=0)
-        if key.endswith("d"):
-            try:
-                days = int(key[:-1])
-            except ValueError:
-                return None
-            return now - timedelta(days=days)
-        if key.endswith("h"):
-            try:
-                hours = int(key[:-1])
-            except ValueError:
-                return None
-            return now - timedelta(hours=hours)
-        return None
+    def _get_gen_filter_range(self) -> Tuple[Optional[datetime], Optional[datetime]]:
+        value = getattr(self, "_gen_filter_range", (None, None))
+        if isinstance(value, tuple) and len(value) == 2:
+            return cast(Tuple[Optional[datetime], Optional[datetime]], value)
+        return (None, None)
 
     def _parse_db_timestamp(self, raw: Optional[str]) -> Optional[datetime]:
         if raw is None:
@@ -3779,13 +3843,22 @@ class App(ctk.CTk):
                 continue
         return None
 
-    def _gen_filter_matches(self, created_at: Optional[str], threshold: Optional[datetime]) -> bool:
-        if threshold is None:
+    def _gen_filter_matches(
+        self,
+        created_at: Optional[str],
+        date_range: Tuple[Optional[datetime], Optional[datetime]],
+    ) -> bool:
+        start, end = date_range if date_range else (None, None)
+        if start is None and end is None:
             return True
         created = self._parse_db_timestamp(created_at)
         if created is None:
             return False
-        return created >= threshold
+        if start is not None and created < start:
+            return False
+        if end is not None and created > end:
+            return False
+        return True
 
     def _progress_reset(self, message: str = "Очікування"):
         bar = getattr(self, "progress_bar", None)
@@ -3879,14 +3952,17 @@ class App(ctk.CTk):
                 created = created.strip()
             return rid, name, created
 
-        filter_threshold = self._get_gen_filter_threshold()
+        filter_range = self._get_gen_filter_range()
+        range_active = False
+        if isinstance(filter_range, tuple) and len(filter_range) == 2:
+            range_active = bool(filter_range[0] or filter_range[1])
 
         for cat_row in get_categories(include_created=True):
             cat_id, cat_name, cat_created = _split_meta(cat_row)
             if cat_id is None:
                 continue
             label = _clean_label(cat_name)
-            cat_matches = self._gen_filter_matches(cat_created, filter_threshold)
+            cat_matches = self._gen_filter_matches(cat_created, filter_range)
             brand_nodes = []
 
             for brand_row in get_brands(cat_id, include_created=True):
@@ -3899,15 +3975,15 @@ class App(ctk.CTk):
                     if model_id is None:
                         continue
                     models_raw.append((model_id, model_name, model_created))
-                if filter_threshold is None:
+                if not range_active:
                     models_to_show = models_raw
                 else:
                     models_to_show = [
                         (mid, mname, mcreated)
                         for mid, mname, mcreated in models_raw
-                        if self._gen_filter_matches(mcreated, filter_threshold)
+                        if self._gen_filter_matches(mcreated, filter_range)
                     ]
-                brand_matches = self._gen_filter_matches(brand_created, filter_threshold)
+                brand_matches = self._gen_filter_matches(brand_created, filter_range)
                 if not models_to_show and not brand_matches:
                     continue
                 brand_nodes.append((brand_id, brand_name, brand_created, models_to_show))
