@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import database
 
 
@@ -67,3 +69,33 @@ def test_replace_specs_resets_previous_values(tmp_path, monkeypatch):
         ("Key B", "Updated"),
         ("Key C", "New"),
     ]
+
+
+def test_catalog_entries_include_created_at(tmp_path, monkeypatch):
+    db_path = tmp_path / "catalog.db"
+    monkeypatch.setattr(database, "DB_FILE", str(db_path))
+    database.init_db()
+
+    database.add_category("TestCat")
+    cats_simple = database.get_categories()
+    assert cats_simple and len(cats_simple[0]) == 2
+    cats_full = database.get_categories(include_created=True)
+    cat_id, _cat_name, cat_created = next(entry for entry in cats_full if entry[1] == "TestCat")
+    assert cat_created
+    datetime.fromisoformat(cat_created)
+
+    database.add_brand(cat_id, "TestBrand")
+    brands_simple = database.get_brands(cat_id)
+    assert brands_simple and len(brands_simple[0]) == 2
+    brands_full = database.get_brands(cat_id, include_created=True)
+    brand_id, _brand_name, brand_created = next(entry for entry in brands_full if entry[1] == "TestBrand")
+    assert brand_created
+    datetime.fromisoformat(brand_created)
+
+    database.add_model(brand_id, "TestModel")
+    models_simple = database.get_models(brand_id)
+    assert models_simple and len(models_simple[0]) == 2
+    models_full = database.get_models(brand_id, include_created=True)
+    model_id, _model_name, model_created = next(entry for entry in models_full if entry[1] == "TestModel")
+    assert model_created
+    datetime.fromisoformat(model_created)
