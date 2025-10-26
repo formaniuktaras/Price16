@@ -20,6 +20,11 @@ from typing import Dict, List, Optional, Sequence, Tuple, cast
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
+from data_transfer import (
+    DataTransferError,
+    export_all_data_to_excel,
+    import_all_data_from_excel,
+)
 from templates_service import (
     APP_TITLE,
     DEPENDENCY_WARNINGS,
@@ -1566,12 +1571,14 @@ class App(ctk.CTk):
         self.tab_templates = tabs.add("Шаблони")
         self.tab_parameters = tabs.add("Параметри")
         self.tab_export    = tabs.add("Експорт")
+        self.tab_files     = tabs.add("Файли")
         self.tab_generate  = tabs.add("Генерація")
 
         self._build_tab_catalog()
         self._build_tab_templates()
         self._build_tab_parameters()
         self._build_tab_export()
+        self._build_tab_files()
         self._build_tab_generate()
 
     def _show_dependency_warnings(self):
@@ -3167,6 +3174,119 @@ class App(ctk.CTk):
             self._load_export_field_detail(0)
         else:
             self._load_export_field_detail(None)
+
+    def _build_tab_files(self):
+        wrap = ctk.CTkFrame(self.tab_files)
+        wrap.pack(fill="both", expand=True, padx=10, pady=10)
+        wrap.grid_columnconfigure(0, weight=1)
+        wrap.grid_rowconfigure(1, weight=0)
+
+        info_text = (
+            "Експорт створює резервну копію всіх даних (каталог, шаблони, параметри, налаштування експорту) у форматі Excel.\n"
+            "Імпорт замінює поточні дані значеннями з вибраного файлу."
+        )
+        ctk.CTkLabel(wrap, text=info_text, justify="left", wraplength=720).grid(
+            row=0, column=0, sticky="w", padx=12, pady=(12, 8)
+        )
+
+        self.files_status_var = tk.StringVar(
+            value="Створіть резервну копію перед імпортом, щоб уникнути втрати даних."
+        )
+        ctk.CTkLabel(wrap, textvariable=self.files_status_var, justify="left", wraplength=720).grid(
+            row=1, column=0, sticky="w", padx=12, pady=(0, 10)
+        )
+
+        buttons = ctk.CTkFrame(wrap)
+        buttons.grid(row=2, column=0, sticky="w", padx=12, pady=(0, 12))
+        ctk.CTkButton(buttons, text="Експорт у Excel", command=self._files_export_all, width=200).pack(
+            side="left", padx=(0, 10)
+        )
+        ctk.CTkButton(buttons, text="Імпорт з Excel", command=self._files_import_all, width=200).pack(
+            side="left"
+        )
+
+    def _files_set_status(self, message: str):
+        status_var = getattr(self, "files_status_var", None)
+        if isinstance(status_var, tk.StringVar):
+            status_var.set(message)
+
+    def _files_export_all(self):
+        self._export_apply_detail(False)
+        self._save_title_tags(show_message=False)
+
+        default_name = f"prom_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        file_path = filedialog.asksaveasfilename(
+            title="Зберегти резервну копію",
+            defaultextension=".xlsx",
+            initialfile=default_name,
+            filetypes=[("Excel", "*.xlsx"), ("Усі файли", "*.*")],
+        )
+        if not file_path:
+            return
+
+        try:
+            export_all_data_to_excel(
+                file_path,
+                self.templates,
+                self.title_tags_templates,
+                self.export_fields,
+            )
+        except DataTransferError as exc:
+            self._files_set_status(f"Помилка експорту: {exc.message}")
+            return show_error(f"Помилка експорту (код {exc.code}): {exc.message}")
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("Unexpected error during data export")
+            self._files_set_status("Сталася непередбачена помилка під час експорту.")
+            return show_error(f"Не вдалося зберегти дані: {exc}")
+
+        self._files_set_status(f"Дані збережено у файл: {file_path}")
+        show_info("Резервну копію успішно створено.")
+
+    def _files_import_all(self):
+        self._export_apply_detail(False)
+
+        file_path = filedialog.askopenfilename(
+            title="Виберіть файл резервної копії",
+            filetypes=[("Excel", "*.xlsx *.xlsm *.xltx *.xltm"), ("Усі файли", "*.*")],
+        )
+        if not file_path:
+            return
+
+        if not messagebox.askyesno(
+            "Підтвердження",
+            "Імпорт повністю замінить поточні дані. Продовжити?",
+        ):
+            return
+
+        try:
+            result = import_all_data_from_excel(file_path)
+        except DataTransferError as exc:
+            self._files_set_status(f"Помилка імпорту: {exc.message}")
+            return show_error(f"Помилка імпорту (код {exc.code}): {exc.message}")
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("Unexpected error during data import")
+            self._files_set_status("Сталася непередбачена помилка під час імпорту.")
+            return show_error(f"Не вдалося імпортувати дані: {exc}")
+
+        self.templates = result.get("templates", self.templates)
+        self.title_tags_templates = result.get("title_tags_templates", self.title_tags_templates)
+        self.export_fields = result.get("export_fields", self.export_fields)
+
+        self._refresh_categories()
+        self._refresh_language_tree(select_index=0 if self.templates.get("template_languages") else None)
+        self._refresh_filmtype_tree(select_index=0 if self.templates.get("film_types") else None)
+        self._refresh_filmtype_checkboxes()
+        self._refresh_template_selectors()
+        self._load_title_tags_template()
+        self._load_desc_template()
+        self._refresh_export_fields_tree(select_index=0 if self.export_fields else None)
+        if self.export_fields:
+            self._load_export_field_detail(0)
+        else:
+            self._load_export_field_detail(None)
+
+        self._files_set_status(f"Дані імпортовано з файлу: {file_path}")
+        show_info("Дані успішно імпортовано.")
 
     def _refresh_export_fields_tree(self, select_index=None):
         tree = getattr(self, "export_fields_tree", None)

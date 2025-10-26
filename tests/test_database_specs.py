@@ -1,6 +1,75 @@
 from datetime import datetime
 
+
 import database
+
+
+def test_export_catalog_dump_returns_entities(tmp_path, monkeypatch):
+    db_path = tmp_path / "catalog.db"
+    monkeypatch.setattr(database, "DB_FILE", str(db_path))
+    database.init_db()
+
+    database.add_category("Категорія A")
+    cat_id = next(cid for cid, name in database.get_categories() if name == "Категорія A")
+    database.add_brand(cat_id, "Бренд A")
+    brand_id = next(bid for bid, name in database.get_brands(cat_id) if name == "Бренд A")
+    database.add_model(brand_id, "Модель A")
+    model_id = next(mid for mid, name in database.get_models(brand_id) if name == "Модель A")
+    database.insert_spec(model_id, "Ключ", "Значення")
+
+    dump = database.export_catalog_dump()
+
+    assert dump["categories"] and dump["brands"] and dump["models"] and dump["specs"]
+    assert any(entry["name"] == "Категорія A" for entry in dump["categories"])
+    assert any(entry["category_id"] == cat_id and entry["name"] == "Бренд A" for entry in dump["brands"])
+    assert any(entry["brand_id"] == brand_id and entry["name"] == "Модель A" for entry in dump["models"])
+    assert any(entry["model_id"] == model_id and entry["key"] == "Ключ" for entry in dump["specs"])
+
+
+def test_import_catalog_dump_replaces_data(tmp_path, monkeypatch):
+    db_path = tmp_path / "catalog.db"
+    monkeypatch.setattr(database, "DB_FILE", str(db_path))
+    database.init_db()
+
+    database.add_category("OldCat")
+    old_cat = next(cid for cid, name in database.get_categories() if name == "OldCat")
+    database.add_brand(old_cat, "OldBrand")
+    old_brand = next(bid for bid, name in database.get_brands(old_cat) if name == "OldBrand")
+    database.add_model(old_brand, "OldModel")
+
+    payload = {
+        "categories": [{"id": 1, "name": "NewCat", "created_at": "2024-01-01 00:00:00"}],
+        "brands": [
+            {
+                "id": 1,
+                "category_id": 1,
+                "name": "NewBrand",
+                "created_at": "2024-01-01 00:00:00",
+            }
+        ],
+        "models": [
+            {
+                "id": 1,
+                "brand_id": 1,
+                "name": "NewModel",
+                "created_at": "2024-01-01 00:00:00",
+            }
+        ],
+        "specs": [
+            {"id": 1, "model_id": 1, "key": "Новий ключ", "value": "123"},
+        ],
+    }
+
+    database.import_catalog_dump(payload)
+
+    categories = database.get_categories()
+    assert categories == [(1, "NewCat")]
+    brands = database.get_brands(1)
+    assert brands == [(1, "NewBrand")]
+    models = database.get_models(1)
+    assert models == [(1, "NewModel")]
+    specs = database.get_specs(1)
+    assert [(sid, key, value) for sid, key, value in specs] == [(1, "Новий ключ", "123")]
 
 
 def _prepare_model(tmp_path, monkeypatch) -> int:

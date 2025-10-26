@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Literal, overload
 
 DB_FILE = "catalog.db"
@@ -410,6 +411,232 @@ def load_specs_map(model_ids: Iterable[int]) -> Dict[int, Dict[str, Optional[str
             continue
         specs_map.setdefault(model_id, {})[key] = value
     return specs_map
+
+
+def export_catalog_dump() -> Dict[str, List[Dict[str, object]]]:
+    """Return the complete catalog dataset for backup/export purposes."""
+
+    conn = db_connect()
+    cur = conn.cursor()
+
+    cur.execute("SELECT id, name, created_at FROM categories ORDER BY id")
+    categories = [
+        {
+            "id": row[0],
+            "name": (row[1] or "").strip() if isinstance(row[1], str) else row[1],
+            "created_at": row[2],
+        }
+        for row in cur.fetchall()
+        if row and row[0]
+    ]
+
+    cur.execute("SELECT id, category_id, name, created_at FROM brands ORDER BY id")
+    brands = [
+        {
+            "id": row[0],
+            "category_id": row[1],
+            "name": (row[2] or "").strip() if isinstance(row[2], str) else row[2],
+            "created_at": row[3],
+        }
+        for row in cur.fetchall()
+        if row and row[0]
+    ]
+
+    cur.execute("SELECT id, brand_id, name, created_at FROM models ORDER BY id")
+    models = [
+        {
+            "id": row[0],
+            "brand_id": row[1],
+            "name": (row[2] or "").strip() if isinstance(row[2], str) else row[2],
+            "created_at": row[3],
+        }
+        for row in cur.fetchall()
+        if row and row[0]
+    ]
+
+    cur.execute("SELECT id, model_id, key, value FROM model_specs ORDER BY id")
+    specs = [
+        {
+            "id": row[0],
+            "model_id": row[1],
+            "key": (row[2] or "").strip() if isinstance(row[2], str) else row[2],
+            "value": (row[3] or "").strip() if isinstance(row[3], str) else row[3],
+        }
+        for row in cur.fetchall()
+        if row and row[0]
+    ]
+
+    conn.close()
+
+    return {
+        "categories": categories,
+        "brands": brands,
+        "models": models,
+        "specs": specs,
+    }
+
+
+def import_catalog_dump(payload: Dict[str, Iterable[Dict[str, object]]]) -> None:
+    """Replace the catalog dataset with values from an exported dump."""
+
+    if not isinstance(payload, dict):
+        raise ValueError("Invalid catalog payload: expected a dictionary")
+
+    categories_raw = payload.get("categories") or []
+    brands_raw = payload.get("brands") or []
+    models_raw = payload.get("models") or []
+    specs_raw = payload.get("specs") or []
+
+    def _normalize_created(value):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _to_int(value):
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return None
+        return number if number >= 0 else None
+
+    categories: List[Tuple[int, str, str]] = []
+    seen_category_ids = set()
+    for item in categories_raw:
+        if isinstance(item, dict):
+            raw_id = item.get("id")
+            name = item.get("name")
+            created_at = item.get("created_at")
+        elif isinstance(item, (list, tuple)) and len(item) >= 3:
+            raw_id, name, created_at = item[0], item[1], item[2]
+        else:
+            raise ValueError("Invalid category entry in catalog payload")
+        cat_id = _to_int(raw_id)
+        if not cat_id:
+            raise ValueError("Category ID must be a positive integer")
+        if cat_id in seen_category_ids:
+            raise ValueError(f"Duplicate category ID: {cat_id}")
+        label = (name or "").strip() if isinstance(name, str) else name
+        if not label:
+            raise ValueError(f"Category {cat_id} is missing a name")
+        categories.append((cat_id, label, _normalize_created(created_at)))
+        seen_category_ids.add(cat_id)
+
+    brands: List[Tuple[int, int, str, str]] = []
+    seen_brand_ids = set()
+    valid_categories = seen_category_ids
+    for item in brands_raw:
+        if isinstance(item, dict):
+            raw_id = item.get("id")
+            raw_cat = item.get("category_id")
+            name = item.get("name")
+            created_at = item.get("created_at")
+        elif isinstance(item, (list, tuple)) and len(item) >= 4:
+            raw_id, raw_cat, name, created_at = item[0], item[1], item[2], item[3]
+        else:
+            raise ValueError("Invalid brand entry in catalog payload")
+        brand_id = _to_int(raw_id)
+        if not brand_id:
+            raise ValueError("Brand ID must be a positive integer")
+        if brand_id in seen_brand_ids:
+            raise ValueError(f"Duplicate brand ID: {brand_id}")
+        category_id = _to_int(raw_cat)
+        if not category_id or category_id not in valid_categories:
+            raise ValueError(f"Brand {brand_id} references unknown category {raw_cat}")
+        label = (name or "").strip() if isinstance(name, str) else name
+        if not label:
+            raise ValueError(f"Brand {brand_id} is missing a name")
+        brands.append((brand_id, category_id, label, _normalize_created(created_at)))
+        seen_brand_ids.add(brand_id)
+
+    models: List[Tuple[int, int, str, str]] = []
+    seen_model_ids = set()
+    valid_brands = seen_brand_ids
+    for item in models_raw:
+        if isinstance(item, dict):
+            raw_id = item.get("id")
+            raw_brand = item.get("brand_id")
+            name = item.get("name")
+            created_at = item.get("created_at")
+        elif isinstance(item, (list, tuple)) and len(item) >= 4:
+            raw_id, raw_brand, name, created_at = item[0], item[1], item[2], item[3]
+        else:
+            raise ValueError("Invalid model entry in catalog payload")
+        model_id = _to_int(raw_id)
+        if not model_id:
+            raise ValueError("Model ID must be a positive integer")
+        if model_id in seen_model_ids:
+            raise ValueError(f"Duplicate model ID: {model_id}")
+        brand_id = _to_int(raw_brand)
+        if not brand_id or brand_id not in valid_brands:
+            raise ValueError(f"Model {model_id} references unknown brand {raw_brand}")
+        label = (name or "").strip() if isinstance(name, str) else name
+        if not label:
+            raise ValueError(f"Model {model_id} is missing a name")
+        models.append((model_id, brand_id, label, _normalize_created(created_at)))
+        seen_model_ids.add(model_id)
+
+    specs: List[Tuple[int, int, str, Optional[str]]] = []
+    valid_models = seen_model_ids
+    for item in specs_raw:
+        if isinstance(item, dict):
+            raw_id = item.get("id")
+            raw_model = item.get("model_id")
+            key = item.get("key")
+            value = item.get("value")
+        elif isinstance(item, (list, tuple)) and len(item) >= 4:
+            raw_id, raw_model, key, value = item[0], item[1], item[2], item[3]
+        else:
+            raise ValueError("Invalid spec entry in catalog payload")
+        spec_id = _to_int(raw_id)
+        if not spec_id:
+            raise ValueError("Specification ID must be a positive integer")
+        model_id = _to_int(raw_model)
+        if not model_id or model_id not in valid_models:
+            raise ValueError(f"Specification {spec_id} references unknown model {raw_model}")
+        normalized_key = (key or "").strip() if isinstance(key, str) else key
+        if not normalized_key:
+            raise ValueError(f"Specification {spec_id} is missing a key")
+        normalized_value = (value or "").strip() if isinstance(value, str) else value
+        specs.append((spec_id, model_id, normalized_key, normalized_value))
+
+    conn = db_connect()
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN")
+        cur.execute("DELETE FROM model_specs")
+        cur.execute("DELETE FROM models")
+        cur.execute("DELETE FROM brands")
+        cur.execute("DELETE FROM categories")
+        cur.execute(
+            "DELETE FROM sqlite_sequence WHERE name IN ('model_specs','models','brands','categories')"
+        )
+
+        if categories:
+            cur.executemany(
+                "INSERT INTO categories(id, name, created_at) VALUES(?,?,?)",
+                categories,
+            )
+        if brands:
+            cur.executemany(
+                "INSERT INTO brands(id, category_id, name, created_at) VALUES(?,?,?,?)",
+                brands,
+            )
+        if models:
+            cur.executemany(
+                "INSERT INTO models(id, brand_id, name, created_at) VALUES(?,?,?,?)",
+                models,
+            )
+        if specs:
+            cur.executemany(
+                "INSERT INTO model_specs(id, model_id, key, value) VALUES(?,?,?,?)",
+                specs,
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def _normalize_id_list(ids) -> List[int]:
