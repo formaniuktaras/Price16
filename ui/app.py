@@ -9,6 +9,8 @@ import sys
 import time
 import re
 import threading
+import uuid
+import webbrowser
 from copy import deepcopy
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -16,6 +18,7 @@ from itertools import islice
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple, cast
+from http import HTTPStatus
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -97,11 +100,6 @@ except ModuleNotFoundError:
     )
     sys.exit(1)
 
-try:
-    import webview  # type: ignore
-except ModuleNotFoundError:
-    webview = None
-
 _INPUT_SPLIT_RE = re.compile(r"[\n\r,;\u201a\u201e\uFF0C\u3001]+")
 def split_catalog_input(raw: str):
     if not raw:
@@ -154,6 +152,10 @@ def show_info(msg: str):
     messagebox.showinfo("Інформація", msg)
 
 
+class DescriptionEditorError(RuntimeError):
+    """Raised when the browser-based description editor cannot be launched."""
+
+
 class DescriptionEditorHost:
     """Bridge between the desktop UI and the web-based description editor."""
 
@@ -162,9 +164,11 @@ class DescriptionEditorHost:
         self._active_lang = active_lang if active_lang in docs else next(iter(docs or {"uk": {}}))
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
-        self._window = None
+        self._session_id = uuid.uuid4().hex
+        self._result_event = threading.Event()
         self.result: Optional[Dict[str, Dict[str, object]]] = None
 
+    # ------------------------- HTTP server helpers -------------------------
     def _shutdown_server(self) -> None:
         if self._server is not None:
             try:
@@ -180,79 +184,123 @@ class DescriptionEditorHost:
             self._thread.join(timeout=2)
             self._thread = None
 
-    def _on_closing(self) -> None:
-        if self._window is None:
-            return
-        try:
-            raw = self._window.evaluate_js(
-                "window.__DESC_EDITOR__ ? window.__DESC_EDITOR__.getState() : null"
-            )
-            if raw and raw != "null":
-                if isinstance(raw, bytes):
-                    raw = raw.decode("utf-8", errors="ignore")
-                data = json.loads(raw)
-                docs = data.get("docs") if isinstance(data, dict) else None
-                if isinstance(docs, dict):
-                    self.result = docs  # type: ignore[assignment]
-        except Exception:
-            logger.exception("Не вдалося зчитати дані з веб-редактора")
+    def _api_payload(self) -> Dict[str, object]:
+        return {
+            "activeLang": self._active_lang,
+            "docs": self._docs,
+        }
 
-    def open(self) -> Optional[Dict[str, Dict[str, object]]]:
-        self.result = None
-        if webview is None:
-            show_error(
-                "Для візуального редактора встановіть пакет 'pywebview' (pip install pywebview)."
-            )
-            return None
+    def _accept_result(self, payload: Dict[str, object]) -> bool:
+        docs = payload.get("docs") if isinstance(payload, dict) else None
+        if not isinstance(docs, dict):
+            return False
+        active_lang = payload.get("activeLang")
+        if isinstance(active_lang, str) and active_lang:
+            self._active_lang = active_lang
+        self.result = docs  # type: ignore[assignment]
+        self._result_event.set()
+        return True
+
+    def _create_handler(self):
+        host = self
+
+        class _RequestHandler(SimpleHTTPRequestHandler):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, directory=str(DESC_EDITOR_DIST), **kwargs)
+
+            def log_message(self, format: str, *args: object) -> None:  # pragma: no cover - noisy
+                logger.debug("desc-editor: " + format, *args)
+
+            def _send_json(self, data: Dict[str, object], status: int = HTTPStatus.OK) -> None:
+                body = json.dumps(data).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _send_html(self, html: str, status: int = HTTPStatus.OK) -> None:
+                body = html.encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self) -> None:  # noqa: N802 - required name
+                if self.path.startswith(f"/api/session/{host._session_id}/state"):
+                    self._send_json(host._api_payload())
+                    return
+                if self.path.startswith("/close"):
+                    self._send_html(
+                        """
+<!DOCTYPE html>
+<html lang="uk">
+<head><meta charset="utf-8"><title>Редактор опису</title></head>
+<body style="font-family: sans-serif; margin: 40px;">
+  <h1>Редактор опису</h1>
+  <p>Дані передано у застосунок. Ви можете закрити цю вкладку.</p>
+</body>
+</html>
+""".strip()
+                    )
+                    return
+                super().do_GET()
+
+            def do_POST(self) -> None:  # noqa: N802 - required name
+                if self.path.startswith(f"/api/session/{host._session_id}/save"):
+                    length = int(self.headers.get("Content-Length") or 0)
+                    raw = self.rfile.read(length)
+                    try:
+                        payload = json.loads(raw.decode("utf-8"))
+                    except json.JSONDecodeError:
+                        self._send_json({"error": "Invalid JSON"}, status=HTTPStatus.BAD_REQUEST)
+                        return
+                    if not host._accept_result(payload):
+                        self._send_json({"error": "Invalid payload"}, status=HTTPStatus.BAD_REQUEST)
+                        return
+                    self._send_json({"status": "ok"})
+                    return
+                self.send_error(HTTPStatus.NOT_FOUND, "Endpoint not found")
+
+        return _RequestHandler
+
+    # ------------------------- Public API -------------------------
+    def launch(self) -> None:
         if not DESC_EDITOR_ENTRY.exists():
-            show_error(
-                "Фронтенд редактора не знайдено. Перейдіть у каталог 'desc-editor' та виконайте "
-                "'npm install' і 'npm run build'."
+            raise DescriptionEditorError(
+                "Фронтенд редактора не знайдено. Перейдіть у каталог 'desc-editor' та виконайте 'npm install' і 'npm run build'."
             )
-            return None
 
-        handler = partial(SimpleHTTPRequestHandler, directory=str(DESC_EDITOR_DIST))
-        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        handler_cls = self._create_handler()
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
         server.daemon_threads = True
         self._server = server
         self._thread = threading.Thread(target=server.serve_forever, daemon=True)
         self._thread.start()
+
         port = server.server_address[1]
+        url = f"http://127.0.0.1:{port}/index.html?session={self._session_id}"
+        opened = webbrowser.open(url, new=1)
+        if not opened:
+            logger.warning("Не вдалося автоматично відкрити браузер для редактора опису")
 
-        url = f"http://127.0.0.1:{port}/index.html"
-        window = webview.create_window(
-            "Редактор шаблону опису",
-            url,
-            width=1180,
-            height=820,
-            resizable=True,
-        )
-        self._window = window
-        window.events.closing += self._on_closing
+    def poll_result(self) -> Optional[Dict[str, Dict[str, object]]]:
+        if self._result_event.is_set():
+            return cast(Optional[Dict[str, Dict[str, object]]], self.result)
+        return None
 
-        initial_payload = json.dumps(
-            {
-                "activeLang": self._active_lang,
-                "docs": self._docs,
-            }
-        )
+    def wait(self, timeout: Optional[float] = None) -> Optional[Dict[str, Dict[str, object]]]:
+        if self._result_event.wait(timeout):
+            return cast(Optional[Dict[str, Dict[str, object]]], self.result)
+        return None
 
-        def _inject_state() -> None:
-            try:
-                window.evaluate_js(
-                    "(function(){const payload="
-                    + initial_payload
-                    + ";function apply(){if(window.__DESC_EDITOR__){window.__DESC_EDITOR__.setState(payload);window.__DESC_EDITOR__.setMode('visual');}else{setTimeout(apply,80);}}apply();})();"
-                )
-            except Exception:
-                logger.exception("Не вдалося передати початковий стан у веб-редактор")
+    @property
+    def is_running(self) -> bool:
+        return self._server is not None
 
-        try:
-            webview.start(_inject_state, window)
-        finally:
-            self._shutdown_server()
-
-        return self.result
+    def close(self) -> None:
+        self._shutdown_server()
 
 
 class SpecsBulkEditor(ctk.CTkToplevel):
@@ -1093,6 +1141,7 @@ class App(ctk.CTk):
         self.progress_bar = None
         self.progress_label = None
         self._preview_window = None
+        self._active_desc_host = None
         # Compatibility: some flows expect the filmtype name variable to exist during tab
         # construction even if the dedicated film type tab is hidden. Older widgets access
         # the variable through the low-level Tk interpreter (self.tk), so expose it there
@@ -2236,7 +2285,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(right, text="Шаблон опису (доступні {{ brand }}, {{ model }}, {{ film_type }})").pack(anchor="w", padx=10, pady=(10, 0))
         editor_toolbar = ctk.CTkFrame(right)
         editor_toolbar.pack(fill="x", padx=10, pady=(6, 0))
-        can_use_web_editor = webview is not None and DESC_EDITOR_ENTRY.exists()
+        can_use_web_editor = DESC_EDITOR_ENTRY.exists()
         self.desc_editor_btn = ctk.CTkButton(
             editor_toolbar,
             text="Відкрити візуальний редактор",
@@ -2245,9 +2294,9 @@ class App(ctk.CTk):
         )
         self.desc_editor_btn.pack(side="left")
         hint_text = (
-            "Відкриває редактор з інструментами форматування Prom.ua"
+            "Редактор відкриється у браузері. Після збереження поверніться до застосунку."
             if can_use_web_editor
-            else "Потрібно встановити pywebview та зібрати веб-редактор"
+            else "Потрібно зібрати веб-редактор командою 'npm run build'"
         )
         ctk.CTkLabel(editor_toolbar, text=hint_text).pack(side="left", padx=12)
 
@@ -2438,7 +2487,7 @@ class App(ctk.CTk):
         self.desc_box.insert("1.0", html)
         self._last_desc_html = html
         if hasattr(self, "desc_editor_btn"):
-            can_use_web_editor = webview is not None and DESC_EDITOR_ENTRY.exists()
+            can_use_web_editor = DESC_EDITOR_ENTRY.exists()
             self.desc_editor_btn.configure(state="normal" if can_use_web_editor else "disabled")
 
     def _apply_desc_editor_result(self, category: str, film: str, docs: Dict[str, Dict[str, object]]):
@@ -2468,12 +2517,46 @@ class App(ctk.CTk):
             self._load_desc_template()
             show_info("Шаблон опису збережено.")
 
+    def _on_desc_editor_finished(self) -> None:
+        self._active_desc_host = None
+        if hasattr(self, "desc_editor_btn"):
+            can_use_web_editor = DESC_EDITOR_ENTRY.exists()
+            self.desc_editor_btn.configure(state="normal" if can_use_web_editor else "disabled")
+
+    def _poll_desc_editor_result(
+        self,
+        host: DescriptionEditorHost,
+        category: str,
+        film: str,
+        delay_ms: int = 600,
+    ) -> None:
+        result = host.poll_result()
+        if result is None:
+            if host.is_running:
+                self.after(delay_ms, lambda: self._poll_desc_editor_result(host, category, film, delay_ms))
+                return
+            host.close()
+            self._on_desc_editor_finished()
+            return
+
+        host.close()
+        self._on_desc_editor_finished()
+        if isinstance(result, dict) and result:
+            self._apply_desc_editor_result(category, film, result)
+
     def _open_desc_editor(self):
         category = getattr(self, "_current_desc_category", None) or GLOBAL_DESCRIPTION_KEY
         film = self._selected_film_type_key()
         language_codes = list(dict.fromkeys([code for code in ["uk", "ru", "en"] + self._template_language_codes() if code]))
         if not language_codes:
             language_codes = ["uk"]
+        existing_host = getattr(self, "_active_desc_host", None)
+        if isinstance(existing_host, DescriptionEditorHost):
+            try:
+                existing_host.close()
+            except Exception:
+                logger.exception("Не вдалося закрити попередню сесію редактора опису")
+            self._on_desc_editor_finished()
         docs: Dict[str, Dict[str, object]] = {}
         for lang in language_codes:
             html, _ = self._resolve_desc_template_html(category, film, lang)
@@ -2485,9 +2568,17 @@ class App(ctk.CTk):
             }
         active_lang = self._current_template_language or language_codes[0]
         host = DescriptionEditorHost(docs, active_lang)
-        result = host.open()
-        if isinstance(result, dict) and result:
-            self._apply_desc_editor_result(category, film, result)
+        try:
+            host.launch()
+        except DescriptionEditorError as exc:
+            show_error(str(exc))
+            return
+
+        self._active_desc_host = host
+        show_info(
+            "Редактор відкрито у браузері. Після завершення натисніть 'Зберегти в застосунок' у вкладці браузера."
+        )
+        self._poll_desc_editor_result(host, category, film)
 
     def _save_desc_template(self):
         category = getattr(self, "_current_desc_category", None)
