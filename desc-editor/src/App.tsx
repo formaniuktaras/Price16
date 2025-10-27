@@ -17,6 +17,7 @@ import Assets from './editor/Sidebar/Assets';
 import Blocks from './editor/Sidebar/Blocks';
 import History from './editor/Sidebar/History';
 import { clearStorage, exportState, loadFromStorage, parseImport, saveToStorage, toBundle } from './core/storage';
+import { isHosted, loadHostState, sendStateToHost } from './core/host';
 
 const LangTabs: React.FC = () => {
   const {
@@ -73,6 +74,7 @@ const Workspace: React.FC = () => {
   } = useEditorActions();
   const doc = state.docs[state.activeLang];
   const [fullScreen, setFullScreen] = useState(false);
+  const [isSending, setIsSending] = useState(false);
   const importInputRef = useRef<HTMLInputElement>(null);
   const lastSnapshotRef = useRef<Record<string, string>>({});
 
@@ -125,6 +127,7 @@ const Workspace: React.FC = () => {
   }, [state, setMode]);
 
   useEffect(() => {
+    if (isHosted) return undefined;
     const interval = setInterval(() => saveToStorage(state), 4000);
     return () => clearInterval(interval);
   }, [state]);
@@ -149,6 +152,21 @@ const Workspace: React.FC = () => {
     setAssets(imported.lang, imported.assets ?? []);
   };
 
+  const handleSendToApp = async () => {
+    if (!isHosted || isSending) return;
+    setIsSending(true);
+    try {
+      await sendStateToHost(state);
+      alert('Дані передано у застосунок. Поверніться до нього та закрийте вкладку.');
+      window.location.href = '/close';
+    } catch (error) {
+      console.error('Не вдалося передати дані у застосунок', error);
+      alert(error instanceof Error ? error.message : 'Не вдалося передати дані у застосунок');
+    } finally {
+      setIsSending(false);
+    }
+  };
+
   return (
     <div className={clsx('workspace', { 'workspace--fullscreen': fullScreen })}>
       <header className="workspace__top">
@@ -167,6 +185,11 @@ const Workspace: React.FC = () => {
           <button type="button" onClick={() => { clearStorage(); window.location.reload(); }}>
             Очистити кеш
           </button>
+          {isHosted && (
+            <button type="button" onClick={handleSendToApp} disabled={isSending}>
+              {isSending ? 'Збереження…' : 'Зберегти в застосунок'}
+            </button>
+          )}
           <input
             type="file"
             accept="application/json"
@@ -207,11 +230,32 @@ const AppShell = React.forwardRef<DescEditorRef, {}>((_, ref) => {
   } = useEditorActions();
 
   useEffect(() => {
+    if (isHosted) return;
     const persisted = loadFromStorage();
     if (persisted) {
       replaceState(buildStateFromDocs(persisted.docs as Record<'uk' | 'ru' | 'en', DescDoc>, persisted.activeLang));
     }
   }, [replaceState]);
+
+  useEffect(() => {
+    if (!isHosted) return;
+    let cancelled = false;
+    loadHostState()
+      .then((payload) => {
+        if (cancelled || !payload || !payload.docs) return;
+        const docs = payload.docs as Record<'uk' | 'ru' | 'en', DescDoc>;
+        const nextLang = (payload.activeLang ?? 'uk') as Lang;
+        replaceState(buildStateFromDocs(docs, nextLang));
+        setLang(nextLang);
+        setMode('visual');
+      })
+      .catch((error) => {
+        console.error('Не вдалося отримати стан із застосунку', error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [replaceState, setLang, setMode]);
 
   useEffect(() => {
     const global = window as typeof window & { __DESC_EDITOR__?: Record<string, unknown> };
