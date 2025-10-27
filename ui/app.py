@@ -85,6 +85,8 @@ from database import (
 from formula_engine import FormulaEngine, FormulaError
 from specs_io import format_specs_for_clipboard, parse_specs_payload
 
+from desc_editor_build import DescEditorBuildError, ensure_desc_editor_built
+
 logger = logging.getLogger(__name__)
 
 DESC_EDITOR_DIST = (Path(__file__).resolve().parent.parent / "desc-editor" / "dist").resolve()
@@ -267,9 +269,18 @@ class DescriptionEditorHost:
 
     # ------------------------- Public API -------------------------
     def launch(self) -> None:
+        try:
+            ensure_desc_editor_built()
+        except DescEditorBuildError as exc:
+            raise DescriptionEditorError(
+                "Не вдалося підготувати фронтенд редактора опису. "
+                "Переконайтеся, що встановлено Node.js з npm та повторіть спробу."
+            ) from exc
+
         if not DESC_EDITOR_ENTRY.exists():
             raise DescriptionEditorError(
-                "Фронтенд редактора не знайдено. Перейдіть у каталог 'desc-editor' та виконайте 'npm install' і 'npm run build'."
+                "Фронтенд редактора не знайдено навіть після автоматичної збірки. "
+                "Перевірте журнал виконання npm run build."
             )
 
         handler_cls = self._create_handler()
