@@ -9,41 +9,22 @@ npm install
 npm run dev
 ```
 
-## Підключення як модуля
+## Інтеграція з десктопним застосунком
+
+`main.tsx` запускає редактор як окремий SPA, який очікує, що десктопний хост передасть початкові дані через `window.__DESC_INITIAL__`. Після збірки бандл вбудовується у Tkinter-додаток: він піднімає локальний HTTP-сервер, а редактор спілкується з ним через REST (`/api/session/<id>`). Якщо потрібно керувати станом вручну під час розробки, скористайтеся глобальним об'єктом `window.__DESC_EDITOR__`:
 
 ```ts
-import { mountDescEditor } from './src';
-
-const container = document.getElementById('editor');
-const initial = {
-  uk: { lang: 'uk', html: '<h1>...</h1>', css: '', assets: [] },
-  ru: { lang: 'ru', html: '<h1>...</h1>', css: '', assets: [] },
-  en: { lang: 'en', html: '<h1>...</h1>', css: '', assets: [] },
-};
-
-const ref = await mountDescEditor(container!, initial);
-
-const bundle = ref.toHtmlBundle('uk');
+window.__DESC_EDITOR__?.setState({
+  activeLang: 'uk',
+  docs: {
+    uk: { lang: 'uk', html: '<h1>...</h1>', css: '', assets: [] },
+    ru: { lang: 'ru', html: '<h1>...</h1>', css: '', assets: [] },
+    en: { lang: 'en', html: '<h1>...</h1>', css: '', assets: [] },
+  },
+});
 ```
 
-### API
-
-```ts
-interface DescDoc {
-  lang: 'uk' | 'ru' | 'en';
-  html: string;
-  css: string;
-  assets: Array<{ name: string; dataUrl: string }>;
-}
-
-interface DescEditorRef {
-  getValue(lang?: DescDoc['lang']): DescDoc;
-  setValue(doc: DescDoc): void;
-  importJson(file: File): Promise<void>;
-  exportJson(): Blob;
-  toHtmlBundle(lang?: DescDoc['lang']): string;
-}
-```
+Також доступні утиліти `getState`, `setLang`, `setMode` та `hostApi` (див. `src/core/host.ts`).
 
 ## Структура .desc.json
 
