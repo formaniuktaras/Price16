@@ -56,6 +56,35 @@ def _resolve_npm(explicit: str | None) -> str:
     return resolved
 
 
+def _ensure_node_version() -> str:
+    node_path = shutil.which("node")
+    if node_path is None:
+        raise DescEditorBuildError(
+            "Не знайдено Node.js. Встановіть LTS-версію з https://nodejs.org (18 або новішу)."
+        )
+    try:
+        completed = subprocess.run(
+            [node_path, "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:  # pragma: no cover - depends on external tools
+        raise DescEditorBuildError("Не вдалося визначити версію Node.js (node --version завершився з помилкою).") from exc
+    version = (completed.stdout or completed.stderr or "").strip()
+    normalized = version.lstrip("vV")
+    parts = normalized.split(".")
+    try:
+        major = int(parts[0])
+    except (ValueError, IndexError):
+        major = 0
+    if major < 18:
+        raise DescEditorBuildError(
+            f"Потрібна версія Node.js 18 або новіша, знайдено {version or 'невідому версію'}."
+        )
+    return node_path
+
+
 def _run_command(command: Sequence[str], *, cwd: Path, quiet: bool = False) -> None:
     stdout = subprocess.PIPE if quiet else None
     try:
@@ -111,6 +140,12 @@ def ensure_desc_editor_built(
                 need_build = True
 
     npm_path: str | None = None
+
+    check_runtime = (install and need_install) or need_build
+    if check_runtime:
+        if not quiet:
+            print("[desc-editor] Перевіряємо Node.js…")
+        _ensure_node_version()
 
     if install and need_install:
         npm_path = _resolve_npm(npm_executable)

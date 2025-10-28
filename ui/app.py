@@ -1153,6 +1153,10 @@ class App(ctk.CTk):
         self.progress_label = None
         self._preview_window = None
         self._active_desc_host = None
+        self._desc_editor_prepare_thread = None
+        self._desc_editor_ready = DESC_EDITOR_ENTRY.exists()
+        self._desc_editor_retry_visible = False
+        self._desc_editor_error_shown = False
         # Compatibility: some flows expect the filmtype name variable to exist during tab
         # construction even if the dedicated film type tab is hidden. Older widgets access
         # the variable through the low-level Tk interpreter (self.tk), so expose it there
@@ -2296,7 +2300,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(right, text="Шаблон опису (доступні {{ brand }}, {{ model }}, {{ film_type }})").pack(anchor="w", padx=10, pady=(10, 0))
         editor_toolbar = ctk.CTkFrame(right)
         editor_toolbar.pack(fill="x", padx=10, pady=(6, 0))
-        can_use_web_editor = DESC_EDITOR_ENTRY.exists()
+        can_use_web_editor = self._desc_editor_ready
         self.desc_editor_btn = ctk.CTkButton(
             editor_toolbar,
             text="Відкрити візуальний редактор",
@@ -2304,12 +2308,31 @@ class App(ctk.CTk):
             state="normal" if can_use_web_editor else "disabled",
         )
         self.desc_editor_btn.pack(side="left")
-        hint_text = (
-            "Редактор відкриється у браузері. Після збереження поверніться до застосунку."
-            if can_use_web_editor
-            else "Потрібно зібрати веб-редактор командою 'npm run build'"
+        status_frame = ctk.CTkFrame(editor_toolbar, fg_color="transparent")
+        status_frame.pack(side="left", fill="x", expand=True, padx=12)
+        self.desc_editor_status_label = ctk.CTkLabel(
+            status_frame,
+            text="Перевіряємо стан веб-редактора…",
+            justify="left",
+            wraplength=360,
         )
-        ctk.CTkLabel(editor_toolbar, text=hint_text).pack(side="left", padx=12)
+        self.desc_editor_status_label.pack(side="left", fill="x", expand=True)
+        self.desc_editor_retry_btn = ctk.CTkButton(
+            status_frame,
+            text="Спробувати ще раз",
+            width=160,
+            command=lambda: self._start_desc_editor_prepare(force=True),
+        )
+        self.desc_editor_retry_btn.pack(side="right", padx=(12, 0))
+        self.desc_editor_retry_btn.pack_forget()
+        if can_use_web_editor:
+            self._set_desc_editor_status(
+                "Редактор готовий до запуску у браузері. Після збереження поверніться до застосунку."
+            )
+        else:
+            self._set_desc_editor_status(
+                "Перевіряємо стан веб-редактора… Зачекайте, ми зберемо все автоматично."
+            )
 
         self.desc_box = ctk.CTkTextbox(right, fg_color="#ffffff", text_color="#1f2933")
         self.desc_box.pack(fill="both", expand=True, padx=10, pady=5)
@@ -2324,6 +2347,7 @@ class App(ctk.CTk):
         self.desc_cat_var = tk.StringVar(value="")
 
         self._refresh_template_selectors()
+        self._start_desc_editor_prepare()
 
     def _save_title_tags(self, show_message: bool = True):
         film = self._selected_film_type_key()
@@ -2534,6 +2558,81 @@ class App(ctk.CTk):
             can_use_web_editor = DESC_EDITOR_ENTRY.exists()
             self.desc_editor_btn.configure(state="normal" if can_use_web_editor else "disabled")
 
+    def _set_desc_editor_status(self, message: str) -> None:
+        if hasattr(self, "desc_editor_status_label"):
+            try:
+                self.desc_editor_status_label.configure(text=message)
+            except Exception:  # pragma: no cover - UI best effort
+                logger.exception("Не вдалося оновити статус веб-редактора")
+
+    def _toggle_desc_editor_retry(self, visible: bool) -> None:
+        if not hasattr(self, "desc_editor_retry_btn"):
+            return
+        if visible and not self._desc_editor_retry_visible:
+            try:
+                self.desc_editor_retry_btn.pack(side="right", padx=(12, 0))
+                self._desc_editor_retry_visible = True
+            except Exception:  # pragma: no cover - UI best effort
+                logger.exception("Не вдалося показати кнопку повторної спроби збірки")
+        elif not visible and self._desc_editor_retry_visible:
+            try:
+                self.desc_editor_retry_btn.pack_forget()
+                self._desc_editor_retry_visible = False
+            except Exception:
+                logger.exception("Не вдалося приховати кнопку повторної спроби збірки")
+
+    def _start_desc_editor_prepare(self, force: bool = False) -> None:
+        thread = getattr(self, "_desc_editor_prepare_thread", None)
+        if thread and thread.is_alive():
+            return
+        if force:
+            self._desc_editor_error_shown = False
+        self._set_desc_editor_status("Готуємо веб-редактор… Це може зайняти кілька хвилин.")
+        if hasattr(self, "desc_editor_btn"):
+            self.desc_editor_btn.configure(state="disabled")
+        self._toggle_desc_editor_retry(False)
+
+        def worker() -> None:
+            try:
+                ensure_desc_editor_built(force=force, quiet=True)
+            except DescEditorBuildError as exc:
+                logger.exception("Не вдалося автоматично зібрати веб-редактор", exc_info=True)
+                self.after(0, lambda: self._on_desc_editor_prepare_failed(str(exc)))
+                return
+            self.after(0, self._on_desc_editor_prepare_ready)
+
+        thread = threading.Thread(target=worker, daemon=True)
+        self._desc_editor_prepare_thread = thread
+        thread.start()
+
+    def _on_desc_editor_prepare_ready(self) -> None:
+        self._desc_editor_prepare_thread = None
+        self._desc_editor_ready = True
+        if hasattr(self, "desc_editor_btn"):
+            self.desc_editor_btn.configure(state="normal")
+        self._toggle_desc_editor_retry(False)
+        self._set_desc_editor_status(
+            "Редактор готовий до запуску у браузері. Після збереження поверніться до застосунку."
+        )
+
+    def _on_desc_editor_prepare_failed(self, error: str) -> None:
+        self._desc_editor_prepare_thread = None
+        self._desc_editor_ready = DESC_EDITOR_ENTRY.exists()
+        if hasattr(self, "desc_editor_btn"):
+            state = "normal" if self._desc_editor_ready else "disabled"
+            self.desc_editor_btn.configure(state=state)
+        self._toggle_desc_editor_retry(True)
+        self._set_desc_editor_status(
+            "Автозбірка не вдалася. Запустіть у терміналі 'python -m desc_editor_build --force' та повторіть спробу."
+        )
+        if not self._desc_editor_error_shown:
+            self._desc_editor_error_shown = True
+            show_error(
+                "Автозбірка веб-редактора не вдалася.\n"
+                "Виконайте 'python -m desc_editor_build --force' і переконайтеся, що встановлено Node.js 18+.\n"
+                f"Деталі: {error}"
+            )
+
     def _poll_desc_editor_result(
         self,
         host: DescriptionEditorHost,
@@ -2556,6 +2655,14 @@ class App(ctk.CTk):
             self._apply_desc_editor_result(category, film, result)
 
     def _open_desc_editor(self):
+        thread = getattr(self, "_desc_editor_prepare_thread", None)
+        if thread and thread.is_alive():
+            show_info("Веб-редактор ще готується. Зачекайте завершення автозбірки.")
+            return
+        if not getattr(self, "_desc_editor_ready", False):
+            self._start_desc_editor_prepare(force=True)
+            show_info("Редактор ще не готовий. Спробуйте ще раз за кілька хвилин.")
+            return
         category = getattr(self, "_current_desc_category", None) or GLOBAL_DESCRIPTION_KEY
         film = self._selected_film_type_key()
         language_codes = list(dict.fromkeys([code for code in ["uk", "ru", "en"] + self._template_language_codes() if code]))
