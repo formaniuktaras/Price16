@@ -67,6 +67,11 @@ def _run_command(command: Sequence[str], *, cwd: Path, quiet: bool = False) -> N
         raise DescEditorBuildError(f"Не вдалося виконати {' '.join(command)}: команда не знайдена") from exc
 
 
+def _clean_directory(path: Path) -> None:
+    if path.exists():
+        shutil.rmtree(path)
+
+
 def ensure_desc_editor_built(
     force: bool = False,
     *,
@@ -129,6 +134,10 @@ def ensure_desc_editor_built(
         npm_path = npm_path or _resolve_npm(npm_executable)
         if not quiet:
             print("[desc-editor] Building production bundle…")
+        if DIST_DIR.exists():
+            if not quiet:
+                print("[desc-editor] Очищення попередньої збірки…")
+            _clean_directory(DIST_DIR)
         _run_command([npm_path, "run", "build"], cwd=EDITOR_ROOT, quiet=quiet)
         BUILD_STAMP.parent.mkdir(parents=True, exist_ok=True)
         BUILD_STAMP.write_text(str(time.time()))
