@@ -19,3 +19,13 @@ def test_textjoin_keeps_empty_values_when_requested():
 def test_textjoin_flattens_nested_sequences():
     result = FormulaEngine.evaluate('=TEXTJOIN(""; TRUE; SPLIT("AA BB"; " "); "CC")')
     assert result == "AABBCC"
+
+
+def test_arrayformula_passes_through_sequences():
+    result = FormulaEngine.evaluate('=ARRAYFORMULA(SPLIT("AA BB"; " "))')
+    assert result == ["AA", "BB"]
+
+
+def test_arrayformula_flattens_multiple_arguments():
+    result = FormulaEngine.evaluate('=ARRAYFORMULA("A"; SPLIT("B C"; " "))')
+    assert result == ["A", "B", "C"]

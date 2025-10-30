@@ -798,6 +798,14 @@ def _build_default_functions() -> Dict[str, Callable[..., Any]]:
     def func_value(text: Any) -> float:
         return FormulaEngine._to_number(text)
 
+    def func_arrayformula(*args: Any) -> Any:
+        if not args:
+            return []
+        flattened = list(_flatten(args))
+        if len(flattened) == 1 and len(args) == 1 and not isinstance(args[0], (list, tuple)):
+            return args[0]
+        return flattened
+
     def func_to_text(value: Any) -> str:
         return _ensure_text(value)
 
@@ -884,6 +892,7 @@ def _build_default_functions() -> Dict[str, Callable[..., Any]]:
         'FIND': func_find,
         'SPLIT': func_split,
         'VALUE': func_value,
+        'ARRAYFORMULA': func_arrayformula,
         'TO_TEXT': func_to_text,
         'TEXT': func_text,
         'NOW': func_now,
