@@ -1,9 +1,11 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from formula_engine import FormulaEngine
+from formula_engine import FormulaEngine, FormulaError
 
 
 def test_textjoin_ignores_empty_values():
@@ -29,3 +31,13 @@ def test_arrayformula_passes_through_sequences():
 def test_arrayformula_flattens_multiple_arguments():
     result = FormulaEngine.evaluate('=ARRAYFORMULA("A"; SPLIT("B C"; " "))')
     assert result == ["A", "B", "C"]
+
+
+def test_regexreplace_performs_substitution():
+    result = FormulaEngine.evaluate(r'=REGEXREPLACE("AA-11-BB-22"; "\\d+"; "#")')
+    assert result == "AA-#-BB-#"
+
+
+def test_regexreplace_invalid_pattern_raises_error():
+    with pytest.raises(FormulaError):
+        FormulaEngine.evaluate('=REGEXREPLACE("text"; "("; "x")')
