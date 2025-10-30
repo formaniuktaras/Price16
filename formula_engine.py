@@ -706,6 +706,19 @@ def _build_default_functions() -> Dict[str, Callable[..., Any]]:
     def func_concat(*args: Any) -> str:
         return ''.join(_flatten_text(args))
 
+    def func_textjoin(delimiter: Any, ignore_empty: Any, *args: Any) -> str:
+        sep = _ensure_text(delimiter)
+        if isinstance(ignore_empty, str):
+            ignore_flag = ignore_empty.strip().upper() in {'TRUE', '1'}
+        else:
+            ignore_flag = bool(ignore_empty)
+        pieces: List[str] = []
+        for value in _flatten(args):
+            if ignore_flag and _is_blank(value):
+                continue
+            pieces.append(_ensure_text(value))
+        return sep.join(pieces)
+
     def func_lower(text: Any) -> str:
         return _ensure_text(text).lower()
 
@@ -857,6 +870,7 @@ def _build_default_functions() -> Dict[str, Callable[..., Any]]:
         'LEN': func_len,
         'CONCAT': func_concat,
         'CONCATENATE': func_concat,
+        'TEXTJOIN': func_textjoin,
         'LOWER': func_lower,
         'UPPER': func_upper,
         'PROPER': func_proper,
