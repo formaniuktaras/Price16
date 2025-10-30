@@ -864,6 +864,19 @@ def _build_default_functions() -> Dict[str, Callable[..., Any]]:
     def func_isblank(value: Any) -> bool:
         return _is_blank(value)
 
+    def func_regexreplace(text: Any, pattern: Any, replacement: Any) -> str:
+        source = _ensure_text(text)
+        regex = _ensure_text(pattern)
+        repl = _ensure_text(replacement)
+        try:
+            compiled = re.compile(regex)
+        except re.error as exc:
+            raise FormulaError(f"Invalid regular expression: {exc}") from exc
+        try:
+            return compiled.sub(repl, source)
+        except re.error as exc:
+            raise FormulaError(f"Invalid replacement string: {exc}") from exc
+
     functions: Dict[str, Callable[..., Any]] = {
         'IF': func_if,
         'IFS': func_ifs,
@@ -890,6 +903,7 @@ def _build_default_functions() -> Dict[str, Callable[..., Any]]:
         'MID': func_mid,
         'SEARCH': func_search,
         'FIND': func_find,
+        'REGEXREPLACE': func_regexreplace,
         'SPLIT': func_split,
         'VALUE': func_value,
         'ARRAYFORMULA': func_arrayformula,
