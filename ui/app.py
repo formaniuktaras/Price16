@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import time
+import queue
 import re
 import threading
 import uuid
@@ -14,10 +15,9 @@ import webbrowser
 from copy import deepcopy
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from itertools import islice
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, cast
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, cast
 from http import HTTPStatus
 
 import tkinter as tk
@@ -1101,6 +1101,15 @@ class App(ctk.CTk):
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
+        self._setup_ttk_styles()
+
+        self._generation_task_running = False
+        self._active_generation_thread: Optional[threading.Thread] = None
+        self._progress_lock = threading.Lock()
+        self._last_progress_update = 0.0
+        self._ui_event_queue: "queue.Queue[Callable[[], None]]" = queue.Queue()
+        self._ui_queue_job: Optional[str] = None
+
         self.templates = load_templates()
         self.title_tags_templates = load_title_tags_templates(self.templates)
         self.export_fields = load_export_fields()
@@ -1157,6 +1166,11 @@ class App(ctk.CTk):
         self._desc_editor_ready = DESC_EDITOR_ENTRY.exists()
         self._desc_editor_retry_visible = False
         self._desc_editor_error_shown = False
+        self.generate_preview_button = None
+        self.generate_run_button = None
+        self.generate_tree_buttons: List[ctk.CTkButton] = []
+        self.choose_folder_button = None
+        self.out_folder_entry = None
         # Compatibility: some flows expect the filmtype name variable to exist during tab
         # construction even if the dedicated film type tab is hidden. Older widgets access
         # the variable through the low-level Tk interpreter (self.tk), so expose it there
@@ -1178,6 +1192,152 @@ class App(ctk.CTk):
 
         if DEPENDENCY_WARNINGS:
             self.after(200, self._show_dependency_warnings)
+
+        self.after(100, self._process_ui_queue)
+
+    def _setup_ttk_styles(self) -> None:
+        try:
+            style = ttk.Style(self)
+        except Exception:
+            return
+
+        try:
+            current_theme = style.theme_use()
+        except Exception:
+            current_theme = ""
+
+        if current_theme in {"", "default", "classic"}:
+            try:
+                style.theme_use("clam")
+            except Exception:
+                pass
+
+        base_bg = "#1b1d21"
+        base_fg = "#f1f5f9"
+        highlight = "#1f6aa5"
+
+        body_font = ctk.CTkFont(size=13)
+        heading_font = ctk.CTkFont(size=13, weight="bold")
+
+        body_family = body_font.actual("family") or body_font.cget("family")
+        heading_family = heading_font.actual("family") or heading_font.cget("family")
+        body_size = body_font.cget("size")
+        heading_size = heading_font.cget("size")
+
+        style.configure(
+            "Treeview",
+            background=base_bg,
+            fieldbackground=base_bg,
+            foreground=base_fg,
+            rowheight=26,
+            font=(body_family, body_size),
+            bordercolor=base_bg,
+            borderwidth=0,
+            relief="flat",
+            padding=0,
+        )
+        style.configure(
+            "Treeview.Heading",
+            background=highlight,
+            foreground="#ffffff",
+            font=(heading_family, heading_size, "bold"),
+            relief="flat",
+            borderwidth=0,
+            padding=(6, 4),
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", highlight)],
+            foreground=[("selected", "#ffffff")],
+        )
+        style.map(
+            "Treeview.Heading",
+            background=[("active", highlight)],
+            relief=[("active", "flat")],
+        )
+        style.layout(
+            "Treeview",
+            [
+                (
+                    "Treeview.treearea",
+                    {
+                        "sticky": "nswe",
+                    },
+                )
+            ],
+        )
+
+    def _ensure_background_primitives(self) -> None:
+        if not hasattr(self, "_progress_lock") or self._progress_lock is None:
+            self._progress_lock = threading.Lock()
+        if not hasattr(self, "_ui_event_queue") or self._ui_event_queue is None:
+            self._ui_event_queue = queue.Queue()
+        if not hasattr(self, "_ui_queue_job"):
+            self._ui_queue_job = None
+        if not hasattr(self, "_generation_task_running"):
+            self._generation_task_running = False
+        if not hasattr(self, "_active_generation_thread"):
+            self._active_generation_thread = None
+        if not hasattr(self, "_last_progress_update"):
+            self._last_progress_update = 0.0
+
+    def _process_ui_queue(self) -> None:
+        self._ensure_background_primitives()
+        if not hasattr(self, "_ui_event_queue"):
+            return
+        try:
+            while True:
+                callback = self._ui_event_queue.get_nowait()
+                try:
+                    callback()
+                except Exception:
+                    logger.exception("Не вдалося виконати відкладену дію інтерфейсу")
+        except queue.Empty:
+            pass
+        try:
+            self._ui_queue_job = self.after(60, self._process_ui_queue)
+        except Exception:
+            self._ui_queue_job = None
+
+    def _call_in_ui_thread(self, func: Callable[..., None], *args, **kwargs) -> None:
+        try:
+            self._ensure_background_primitives()
+        except Exception:
+            pass
+
+        after_fn = getattr(self, "after", None)
+        if after_fn is None or not callable(after_fn):
+            try:
+                func(*args, **kwargs)
+            except Exception:
+                logger.exception("Помилка під час оновлення інтерфейсу")
+            return
+
+        queue_obj = getattr(self, "_ui_event_queue", None)
+        if queue_obj is None:
+            try:
+                func(*args, **kwargs)
+            except Exception:
+                logger.exception("Помилка під час оновлення інтерфейсу")
+            return
+
+        def _wrapper() -> None:
+            try:
+                func(*args, **kwargs)
+            except Exception:
+                logger.exception("Помилка під час оновлення інтерфейсу")
+
+        queue_obj.put(_wrapper)
+
+    def _start_background_task(self, target: Callable[[], None], name: str = "background-task") -> threading.Thread:
+        self._ensure_background_primitives()
+        after_fn = getattr(self, "after", None)
+        if after_fn is None or not callable(after_fn):
+            target()
+            return threading.current_thread()
+        thread = threading.Thread(target=target, name=name, daemon=True)
+        thread.start()
+        return thread
 
     def _install_clipboard_shortcuts(self) -> None:
         sequences = [
@@ -3984,10 +4144,19 @@ class App(ctk.CTk):
 
         controls = ctk.CTkFrame(left)
         controls.pack(fill="x", padx=10, pady=(0, 8))
-        ctk.CTkButton(controls, text="Вибрати все", command=self._select_all_gen_tree, width=120).pack(side="left", padx=4)
-        ctk.CTkButton(controls, text="Очистити", command=self._clear_all_gen_tree, width=120).pack(side="left", padx=4)
-        ctk.CTkButton(controls, text="Розгорнути все", command=self._expand_all_gen_tree, width=140).pack(side="right", padx=4)
-        ctk.CTkButton(controls, text="Згорнути все", command=self._collapse_all_gen_tree, width=140).pack(side="right", padx=4)
+        self.generate_tree_buttons = []
+        btn_select_all = ctk.CTkButton(controls, text="Вибрати все", command=self._select_all_gen_tree, width=120)
+        btn_select_all.pack(side="left", padx=4)
+        self.generate_tree_buttons.append(btn_select_all)
+        btn_clear = ctk.CTkButton(controls, text="Очистити", command=self._clear_all_gen_tree, width=120)
+        btn_clear.pack(side="left", padx=4)
+        self.generate_tree_buttons.append(btn_clear)
+        btn_expand = ctk.CTkButton(controls, text="Розгорнути все", command=self._expand_all_gen_tree, width=140)
+        btn_expand.pack(side="right", padx=4)
+        self.generate_tree_buttons.append(btn_expand)
+        btn_collapse = ctk.CTkButton(controls, text="Згорнути все", command=self._collapse_all_gen_tree, width=140)
+        btn_collapse.pack(side="right", padx=4)
+        self.generate_tree_buttons.append(btn_collapse)
 
         tip_text = (
             "Порада: клацніть або натисніть пробіл, щоб поставити/зняти галочку. "
@@ -4019,10 +4188,16 @@ class App(ctk.CTk):
         path_frame.pack(fill="x", padx=10, pady=(4, 6))
         ctk.CTkLabel(path_frame, text="Папка збереження:").pack(anchor="w", padx=6, pady=(4, 4))
         self.out_folder_var = tk.StringVar(value=os.getcwd())
-        path_entry = ctk.CTkEntry(path_frame, textvariable=self.out_folder_var)
-        path_entry.pack(fill="x", padx=6, pady=(0, 4))
-        self._bind_clipboard_shortcuts(path_entry)
-        ctk.CTkButton(path_frame, text="Обрати...", command=self._choose_folder, width=110).pack(anchor="e", padx=6, pady=(0, 4))
+        self.out_folder_entry = ctk.CTkEntry(path_frame, textvariable=self.out_folder_var)
+        self.out_folder_entry.pack(fill="x", padx=6, pady=(0, 4))
+        self._bind_clipboard_shortcuts(self.out_folder_entry)
+        self.choose_folder_button = ctk.CTkButton(
+            path_frame,
+            text="Обрати...",
+            command=self._choose_folder,
+            width=110,
+        )
+        self.choose_folder_button.pack(anchor="e", padx=6, pady=(0, 4))
 
         languages_frame = ctk.CTkFrame(right)
         languages_frame.pack(fill="x", padx=10, pady=(4, 6))
@@ -4050,13 +4225,20 @@ class App(ctk.CTk):
 
         action_row = ctk.CTkFrame(right)
         action_row.pack(fill="x", padx=10, pady=(6, 0))
-        ctk.CTkButton(
+        self.generate_preview_button = ctk.CTkButton(
             action_row,
             text="Попередній перегляд",
             command=self._preview_generation,
             height=36,
-        ).pack(side="right", padx=6)
-        ctk.CTkButton(action_row, text="Згенерувати", command=self._generate, height=36).pack(side="right", padx=6)
+        )
+        self.generate_preview_button.pack(side="right", padx=6)
+        self.generate_run_button = ctk.CTkButton(
+            action_row,
+            text="Згенерувати",
+            command=self._generate,
+            height=36,
+        )
+        self.generate_run_button.pack(side="right", padx=6)
 
         progress_frame = ctk.CTkFrame(right)
         progress_frame.pack(fill="x", padx=10, pady=(10, 0))
@@ -4188,6 +4370,44 @@ class App(ctk.CTk):
         if end is not None and created > end:
             return False
         return True
+
+    def _queue_progress_update(self, current: int, total: int, stage: str) -> None:
+        self._ensure_background_primitives()
+        if not hasattr(self, "_progress_lock"):
+            return
+        with self._progress_lock:
+            now = time.time()
+            last = getattr(self, "_last_progress_update", 0.0)
+            if current not in (0, total) and now - last < 0.05:
+                return
+            self._last_progress_update = now
+        self._call_in_ui_thread(self._progress_update, current, total, stage=stage)
+
+    def _queue_progress_message(self, message: str) -> None:
+        self._call_in_ui_thread(self._progress_message, message)
+
+    def _queue_generation_error(self, message: str, reset_label: str = "Очікування") -> None:
+        def _handle() -> None:
+            self._progress_reset(reset_label)
+            self._finalize_generation_task()
+            self._schedule_progress_idle()
+            show_error(message)
+
+        self._call_in_ui_thread(_handle)
+
+    def _finalize_generation_task(self) -> None:
+        self._ensure_background_primitives()
+        self._generation_task_running = False
+        self._active_generation_thread = None
+        with self._progress_lock:
+            self._last_progress_update = 0.0
+        self._set_generate_controls_state(True)
+
+    def _schedule_progress_idle(self, delay_ms: int = 1800) -> None:
+        try:
+            self.after(delay_ms, lambda: self._progress_reset("Очікування"))
+        except Exception:
+            pass
 
     def _progress_reset(self, message: str = "Очікування"):
         bar = getattr(self, "progress_bar", None)
@@ -4496,72 +4716,186 @@ class App(ctk.CTk):
         for iid in tree.get_children(""):
             self._set_gen_tree_state(iid, 0, propagate=True)
 
+    def _set_generate_controls_state(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        widgets = [
+            getattr(self, "generate_preview_button", None),
+            getattr(self, "generate_run_button", None),
+            getattr(self, "gen_filter_apply", None),
+            getattr(self, "gen_filter_clear", None),
+            getattr(self, "gen_filter_toggle", None),
+            getattr(self, "choose_folder_button", None),
+            getattr(self, "export_fmt_menu", None),
+        ]
+        for widget in widgets:
+            if widget is None:
+                continue
+            try:
+                widget.configure(state=state)
+            except Exception:
+                pass
+
+        entries = [
+            getattr(self, "gen_filter_start_date_entry", None),
+            getattr(self, "gen_filter_start_time_entry", None),
+            getattr(self, "gen_filter_end_date_entry", None),
+            getattr(self, "gen_filter_end_time_entry", None),
+            getattr(self, "out_folder_entry", None),
+        ]
+        for entry in entries:
+            if entry is None:
+                continue
+            try:
+                entry.configure(state=state)
+            except Exception:
+                pass
+
+        for button in getattr(self, "generate_tree_buttons", []):
+            try:
+                button.configure(state=state)
+            except Exception:
+                continue
+
+        for filmtype in getattr(self, "ft_vars", []):
+            widget = None
+            if isinstance(filmtype, dict):
+                widget = filmtype.get("widget")
+            elif isinstance(filmtype, (list, tuple)) and len(filmtype) >= 3:
+                widget = filmtype[2]
+            if widget is None:
+                continue
+            try:
+                widget.configure(state=state)
+            except Exception:
+                continue
+
+        language_container = getattr(self, "generate_language_checks_container", None)
+        if language_container is not None:
+            for child in language_container.winfo_children():
+                try:
+                    child.configure(state=state)
+                except Exception:
+                    continue
+
+        tree = getattr(self, "_gen_tree", None)
+        if tree is not None:
+            try:
+                tree.configure(selectmode="extended" if enabled else "none")
+            except Exception:
+                pass
+
     def _refresh_filmtype_checkboxes(self):
-        for w in getattr(self, "filmtype_frame", []).winfo_children():
-            w.destroy()
+        frame = getattr(self, "filmtype_frame", None)
+        if frame is None:
+            return
+        for widget in frame.winfo_children():
+            widget.destroy()
         self.ft_vars.clear()
-        for item in self.templates["film_types"]:
+        film_types = self.templates.get("film_types", []) if isinstance(self.templates, dict) else []
+        for item in film_types:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            normalized_name = name.strip()
             var = tk.BooleanVar(value=bool(item.get("enabled", True)))
-            ctk.CTkCheckBox(self.filmtype_frame, text=item["name"], variable=var).pack(side="left", padx=6, pady=2)
-            self.ft_vars.append((item["name"], var))
+            checkbox = ctk.CTkCheckBox(frame, text=normalized_name, variable=var)
+            checkbox.pack(side="left", padx=6, pady=2)
+            self.ft_vars.append({"name": normalized_name, "var": var, "widget": checkbox})
         self._refresh_template_selectors()
 
     def _choose_folder(self):
         folder = filedialog.askdirectory(title="Виберіть папку для файлів")
         if folder: self.out_folder_var.set(folder)
 
-    def _preview_generation(self):
-        # оновити шаблони/поля перед переглядом
-        self._save_title_tags(show_message=False)
-        self._export_apply_detail(save_to_file=False)
-
-        selected_types = [name for name, var in self.ft_vars if var.get()]
+    def _collect_generation_context(self) -> Optional[Dict[str, object]]:
+        entries = getattr(self, "ft_vars", [])
+        selected_types = []
+        for entry in entries:
+            name = None
+            var = None
+            if isinstance(entry, dict):
+                name = entry.get("name")
+                var = entry.get("var")
+            elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                name, var = entry[0], entry[1]
+            if isinstance(name, str) and hasattr(var, "get") and callable(getattr(var, "get")):
+                try:
+                    if var.get():
+                        selected_types.append(name)
+                except Exception:
+                    continue
         if not selected_types:
-            return show_error("Оберіть хоча б один тип плівки.")
+            show_error("Оберіть хоча б один тип плівки.")
+            return None
 
-        for name, var in self.ft_vars:
-            for item in self.templates["film_types"]:
-                if item["name"] == name:
-                    item["enabled"] = bool(var.get())
-                    break
+        film_types_store = self.templates.get("film_types") if isinstance(self.templates, dict) else None
+        if isinstance(film_types_store, list):
+            for entry in entries:
+                name = None
+                var = None
+                if isinstance(entry, dict):
+                    name = entry.get("name")
+                    var = entry.get("var")
+                elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                    name, var = entry[0], entry[1]
+                if not isinstance(name, str) or not hasattr(var, "get"):
+                    continue
+                for item in film_types_store:
+                    if isinstance(item, dict) and item.get("name") == name:
+                        try:
+                            item["enabled"] = bool(var.get())
+                        except Exception:
+                            item["enabled"] = True
+                        break
         save_templates(self.templates)
 
         selected_models = sorted(self._collect_checked_model_ids())
         selected_languages = self._collect_selected_export_languages()
         if self._template_language_codes() and self.export_language_vars and not selected_languages:
-            return show_error("Оберіть хоча б одну мову експорту.")
+            show_error("Оберіть хоча б одну мову експорту.")
+            return None
 
-        try:
-            if selected_models:
-                records, columns = generate_export_rows(
-                    selected_types,
-                    self.templates,
-                    self.title_tags_templates,
-                    self.export_fields,
-                    model_ids=selected_models,
-                    languages=selected_languages,
-                )
-            else:
-                records, columns = generate_export_rows(
-                    selected_types,
-                    self.templates,
-                    self.title_tags_templates,
-                    self.export_fields,
-                    languages=selected_languages,
-                )
-        except ValueError as err:
-            return show_error(str(err))
+        export_format = self.export_fmt_var.get() if hasattr(self, "export_fmt_var") else "JSON (.json)"
+        output_folder = self.out_folder_var.get().strip() if hasattr(self, "out_folder_var") else os.getcwd()
+        if not output_folder:
+            output_folder = os.getcwd()
 
-        if not records:
-            return show_error("Немає даних для генерації (перевірте моделі).")
+        context: Dict[str, object] = {
+            "film_types": list(selected_types),
+            "templates": deepcopy(self.templates),
+            "title_tags": deepcopy(self.title_tags_templates),
+            "export_fields": deepcopy(self.export_fields),
+            "selected_models": list(selected_models),
+            "selected_languages": list(selected_languages),
+            "export_format": export_format,
+            "output_folder": output_folder,
+        }
+        return context
 
-        preview_limit = 20
-        preview_records = list(islice(records, preview_limit))
+    def _on_preview_ready(
+        self,
+        columns: Sequence[str],
+        preview_records: Sequence[Sequence[str]],
+        total_count: int,
+    ) -> None:
+        self._progress_finish(f"Попередній перегляд: {total_count} рядків")
+        self._finalize_generation_task()
+        self._show_preview_window(columns, preview_records, total_count)
+        self._schedule_progress_idle()
 
-        if getattr(self, "_preview_window", None) is not None:
+    def _show_preview_window(
+        self,
+        columns: Sequence[str],
+        preview_records: Sequence[Sequence[str]],
+        total_count: int,
+    ) -> None:
+        existing = getattr(self, "_preview_window", None)
+        if existing is not None:
             try:
-                if self._preview_window.winfo_exists():
-                    self._preview_window.destroy()
+                if existing.winfo_exists():
+                    existing.destroy()
             except Exception:
                 pass
 
@@ -4570,7 +4904,7 @@ class App(ctk.CTk):
         preview_window.geometry("960x480")
         self._preview_window = preview_window
 
-        info_text = f"Показано перші {len(preview_records)} з {len(records)} рядків."
+        info_text = f"Показано перші {len(preview_records)} з {total_count} рядків."
         ctk.CTkLabel(preview_window, text=info_text, anchor="w").pack(fill="x", padx=14, pady=(12, 4))
 
         table_frame = ctk.CTkFrame(preview_window)
@@ -4592,92 +4926,171 @@ class App(ctk.CTk):
             tree.heading(col_id, text=header)
             tree.column(col_id, anchor="w", stretch=True, width=160)
 
-        for record in preview_records:
-            values = _row_to_values(record, columns)
-            tree.insert("", "end", values=values)
+        tree.tag_configure("odd", background="#20242b")
+        tree.tag_configure("even", background="#151921")
 
-        if len(records) > preview_limit:
-            note = f"(Доступно більше рядків: всього {len(records)}.)"
+        for idx, record in enumerate(preview_records):
+            values = _row_to_values(record, columns)
+            tag = "odd" if idx % 2 else "even"
+            tree.insert("", "end", values=values, tags=(tag,))
+
+        if total_count > len(preview_records):
+            note = f"(Доступно більше рядків: всього {total_count}.)"
             ctk.CTkLabel(preview_window, text=note, anchor="w").pack(fill="x", padx=14, pady=(0, 10))
 
         ctk.CTkButton(preview_window, text="Закрити", command=preview_window.destroy).pack(pady=(0, 12))
 
-    def _generate(self):
-        self._progress_reset("Підготовка...")
-        # зберегти (на випадок якщо змінювали шаблони перед тим)
+    def _preview_generation(self):
+        self._ensure_background_primitives()
+        if getattr(self, "_generation_task_running", False):
+            return show_info("Інший процес вже виконується. Зачекайте його завершення.")
+
         self._save_title_tags(show_message=False)
         self._export_apply_detail(save_to_file=False)
+        context = self._collect_generation_context()
+        if context is None:
+            return
 
-        selected_types = [name for name, var in self.ft_vars if var.get()]
-        if not selected_types:
+        self._generation_task_running = True
+        self._set_generate_controls_state(False)
+        self._progress_reset("Готуємо попередній перегляд...")
+        self._progress_message("Генеруємо попередній перегляд…")
+        with self._progress_lock:
+            self._last_progress_update = 0.0
+
+        preview_limit = 20
+
+        def worker() -> None:
+            try:
+                def progress_callback(current: int, total: int) -> None:
+                    self._queue_progress_update(current, total, stage="Попередній перегляд")
+
+                extra_kwargs: Dict[str, object] = {
+                    "languages": context.get("selected_languages"),
+                    "progress_callback": progress_callback,
+                }
+                if context.get("selected_models"):
+                    extra_kwargs["model_ids"] = context.get("selected_models")
+                records, columns = generate_export_rows(
+                    context.get("film_types", []),
+                    context.get("templates", {}),
+                    context.get("title_tags", {}),
+                    context.get("export_fields", []),
+                    **extra_kwargs,
+                )
+            except ValueError as err:
+                logger.info("Помилка під час формування попереднього перегляду: %s", err)
+                self._queue_generation_error(str(err), reset_label="Помилка попереднього перегляду")
+                return
+            except Exception as exc:
+                logger.exception("Unexpected error during preview generation")
+                self._queue_generation_error(
+                    f"Неочікувана помилка: {exc}",
+                    reset_label="Помилка попереднього перегляду",
+                )
+                return
+
+            if not records:
+                self._queue_generation_error(
+                    "Немає даних для генерації (перевірте моделі).",
+                    reset_label="Очікування",
+                )
+                return
+
+            total_count = len(records)
+            preview_records = records[:preview_limit]
+            self._call_in_ui_thread(lambda: self._on_preview_ready(columns, preview_records, total_count))
+
+        self._active_generation_thread = self._start_background_task(worker, name="preview-generation")
+
+    def _generate(self):
+        self._ensure_background_primitives()
+        if getattr(self, "_generation_task_running", False):
+            show_info("Інший процес вже виконується. Дочекайтеся завершення попередньої операції.")
+            return
+
+        self._progress_reset("Підготовка...")
+        self._save_title_tags(show_message=False)
+        self._export_apply_detail(save_to_file=False)
+        context = self._collect_generation_context()
+        if context is None:
             self._progress_reset("Очікування")
-            return show_error("Оберіть хоча б один тип плівки.")
+            return
 
-        # оновимо enabled у файлі шаблонів
-        for name, var in self.ft_vars:
-            for item in self.templates["film_types"]:
-                if item["name"] == name:
-                    item["enabled"] = bool(var.get())
-                    break
-        save_templates(self.templates)
-
-        # вибір моделей через дерево
-        selected_models = sorted(self._collect_checked_model_ids())
-        selected_languages = self._collect_selected_export_languages()
-        if self._template_language_codes() and self.export_language_vars and not selected_languages:
-            self._progress_reset("Очікування")
-            return show_error("Оберіть хоча б одну мову експорту.")
+        self._generation_task_running = True
+        self._set_generate_controls_state(False)
         self._progress_message("Генерація даних...")
+        with self._progress_lock:
+            self._last_progress_update = 0.0
 
-        def progress_callback(current, total):
-            self._progress_update(current, total, stage="Генерація")
+        def worker() -> None:
+            try:
+                def progress_callback(current: int, total: int) -> None:
+                    self._queue_progress_update(current, total, stage="Генерація")
 
-        try:
-            if selected_models:
+                extra_kwargs: Dict[str, object] = {
+                    "languages": context.get("selected_languages"),
+                    "progress_callback": progress_callback,
+                }
+                if context.get("selected_models"):
+                    extra_kwargs["model_ids"] = context.get("selected_models")
                 records, columns = generate_export_rows(
-                    selected_types,
-                    self.templates,
-                    self.title_tags_templates,
-                    self.export_fields,
-                    model_ids=selected_models,
-                    languages=selected_languages,
-                    progress_callback=progress_callback,
+                    context.get("film_types", []),
+                    context.get("templates", {}),
+                    context.get("title_tags", {}),
+                    context.get("export_fields", []),
+                    **extra_kwargs,
                 )
-            else:
-                records, columns = generate_export_rows(
-                    selected_types,
-                    self.templates,
-                    self.title_tags_templates,
-                    self.export_fields,
-                    languages=selected_languages,
-                    progress_callback=progress_callback,
+            except ValueError as err:
+                logger.info("Помилка під час генерації: %s", err)
+                self._queue_generation_error(str(err), reset_label="Помилка генерації")
+                return
+            except Exception as exc:
+                logger.exception("Unexpected error during generation")
+                self._queue_generation_error(
+                    f"Неочікувана помилка: {exc}",
+                    reset_label="Помилка генерації",
                 )
-        except ValueError as err:
-            self._progress_reset("Помилка генерації")
-            return show_error(str(err))
+                return
 
-        if not records:
-            self._progress_reset("Очікування")
-            return show_error("Немає даних для генерації (перевірте моделі).")
+            if not records:
+                self._queue_generation_error(
+                    "Немає даних для генерації (перевірте моделі).",
+                    reset_label="Очікування",
+                )
+                return
 
-        # експорт
-        self._progress_message("Експорт файлів...")
-        try:
-            products_file = export_products(
-                records,
-                columns,
-                self.export_fmt_var.get(),
-                self.out_folder_var.get().strip(),
-            )
-        except ExportError as exc:
-            self._progress_reset("Помилка експорту")
-            return show_error(f"Помилка експорту (код {exc.code}): {exc.message}")
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.exception("Unexpected error during export")
-            self._progress_reset("Помилка експорту")
-            return show_error(f"Не вдалося зберегти файли: {exc}")
+            self._queue_progress_message("Експорт файлів...")
+            try:
+                products_file = export_products(
+                    records,
+                    columns,
+                    context.get("export_format", "JSON (.json)"),
+                    context.get("output_folder", os.getcwd()),
+                )
+            except ExportError as exc:
+                self._queue_generation_error(
+                    f"Помилка експорту (код {exc.code}): {exc.message}",
+                    reset_label="Помилка експорту",
+                )
+                return
+            except Exception as exc:
+                logger.exception("Unexpected error during export")
+                self._queue_generation_error(
+                    f"Не вдалося зберегти файли: {exc}",
+                    reset_label="Помилка експорту",
+                )
+                return
 
-        self._progress_finish(f"Готово: {len(records)} рядків")
-        msg = f"✅ Згенеровано {len(records)} рядків.\nФайл експорту: {products_file}"
-        show_info(msg)
+            count = len(records)
+            self._call_in_ui_thread(lambda: self._on_generation_success(count, products_file))
+
+        self._active_generation_thread = self._start_background_task(worker, name="generate-products")
+
+    def _on_generation_success(self, row_count: int, products_file: str) -> None:
+        self._progress_finish(f"Готово: {row_count} рядків")
+        self._finalize_generation_task()
+        self._schedule_progress_idle()
+        if products_file:
+            show_info(f"✅ Згенеровано {row_count} рядків.\nФайл експорту: {products_file}")
 
