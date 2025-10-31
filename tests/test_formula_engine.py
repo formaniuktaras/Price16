@@ -41,3 +41,16 @@ def test_regexreplace_performs_substitution():
 def test_regexreplace_invalid_pattern_raises_error():
     with pytest.raises(FormulaError):
         FormulaEngine.evaluate('=REGEXREPLACE("text"; "("; "x")')
+
+
+def test_textjoin_with_arrayformula_and_left_vectorizes_inputs():
+    context = {
+        "brand": "Fujifilm",
+        "model": "X T3",
+        "film_type": "Camera",
+    }
+    formula = (
+        '=TEXTJOIN(""; TRUE; ARRAYFORMULA(LEFT(SPLIT(TRIM({{ brand }}&" "&{{ model }}&" "&{{ film_type }});" ");1)))'
+    )
+    result = FormulaEngine.evaluate(formula, context)
+    assert result == "FXTC"
