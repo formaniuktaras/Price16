@@ -33,6 +33,16 @@ def test_arrayformula_flattens_multiple_arguments():
     assert result == ["A", "B", "C"]
 
 
+def test_default_function_is_restored_if_missing():
+    removed = FormulaEngine.FUNCTIONS.pop("ARRAYFORMULA", None)
+    try:
+        result = FormulaEngine.evaluate("=ARRAYFORMULA(\"value\")")
+        assert result == "value"
+    finally:
+        if removed is not None:
+            FormulaEngine.FUNCTIONS["ARRAYFORMULA"] = removed
+
+
 def test_regexreplace_performs_substitution():
     result = FormulaEngine.evaluate(r'=REGEXREPLACE("AA-11-BB-22"; "\\d+"; "#")')
     assert result == "AA-#-BB-#"

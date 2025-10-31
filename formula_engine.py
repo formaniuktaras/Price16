@@ -290,9 +290,21 @@ class FormulaEngine:
     FUNCTIONS: Dict[str, Callable[..., Any]] = {}
 
     @classmethod
+    def _ensure_default_functions(cls) -> None:
+        """Ensure that the built-in function set is populated."""
+
+        if not _DEFAULT_FUNCTIONS:
+            return
+        missing = [name for name in _DEFAULT_FUNCTIONS if name not in cls.FUNCTIONS]
+        if missing:
+            for name in missing:
+                cls.FUNCTIONS[name] = _DEFAULT_FUNCTIONS[name]
+
+    @classmethod
     def register_function(cls, name: str, func: Callable[..., Any]) -> None:
         """Register a callable under the provided uppercase name."""
 
+        cls._ensure_default_functions()
         if not callable(func):
             raise TypeError("Registered function must be callable.")
         cls.FUNCTIONS[name.upper()] = func
@@ -318,6 +330,7 @@ class FormulaEngine:
 
     @classmethod
     def parse(cls, formula: str) -> Any:
+        cls._ensure_default_functions()
         if formula is None:
             raise FormulaError("Formula is empty.")
         if not isinstance(formula, str):
@@ -329,6 +342,7 @@ class FormulaEngine:
 
     @classmethod
     def describe(cls, formula: str) -> Dict[str, Any]:
+        cls._ensure_default_functions()
         ast = cls.parse(formula)
         variables: set[str] = set()
         functions: set[str] = set()
@@ -358,6 +372,7 @@ class FormulaEngine:
     def evaluate(cls, formula: str, context: Optional[Mapping[str, Any]] = None) -> Any:
         """Evaluate a single formula using the supplied context."""
 
+        cls._ensure_default_functions()
         if formula is None:
             return None
         if not isinstance(formula, str):
@@ -954,5 +969,6 @@ def _build_default_functions() -> Dict[str, Callable[..., Any]]:
     return functions
 
 
-FormulaEngine.FUNCTIONS.update(_build_default_functions())
+_DEFAULT_FUNCTIONS = _build_default_functions()
+FormulaEngine.FUNCTIONS.update(_DEFAULT_FUNCTIONS)
 
