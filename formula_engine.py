@@ -513,6 +513,25 @@ def _flatten_text(args: Iterable[Any]) -> Iterator[str]:
         yield str(value)
 
 
+def _vectorize_unary(value: Any, func: Callable[[Any], Any]) -> Any:
+    if isinstance(value, (list, tuple)):
+        return [_vectorize_unary(item, func) for item in value]
+    return func(value)
+
+
+def _vectorize_binary(left: Any, right: Any, func: Callable[[Any, Any], Any]) -> Any:
+    if isinstance(left, (list, tuple)):
+        if isinstance(right, (list, tuple)):
+            return [
+                _vectorize_binary(left_item, right_item, func)
+                for left_item, right_item in zip(left, right)
+            ]
+        return [_vectorize_binary(left_item, right, func) for left_item in left]
+    if isinstance(right, (list, tuple)):
+        return [_vectorize_binary(left, right_item, func) for right_item in right]
+    return func(left, right)
+
+
 def _coerce_comparable(value: Any) -> Tuple[Any, bool]:
     try:
         return FormulaEngine._to_number(value), True
@@ -759,16 +778,22 @@ def _build_default_functions() -> Dict[str, Callable[..., Any]]:
         count = max(int(length), 0)
         return source[:start_index] + _ensure_text(new_text) + source[start_index + count :]
 
-    def func_left(text: Any, count: Any = 1) -> str:
-        source = _ensure_text(text)
-        return source[: max(int(count), 0)]
+    def func_left(text: Any, count: Any = 1) -> Any:
+        def _apply(value: Any, length: Any) -> str:
+            source = _ensure_text(value)
+            return source[: max(int(length), 0)]
 
-    def func_right(text: Any, count: Any = 1) -> str:
-        source = _ensure_text(text)
-        length = max(int(count), 0)
-        if length == 0:
-            return ''
-        return source[-length:]
+        return _vectorize_binary(text, count, _apply)
+
+    def func_right(text: Any, count: Any = 1) -> Any:
+        def _apply(value: Any, length: Any) -> str:
+            source = _ensure_text(value)
+            size = max(int(length), 0)
+            if size == 0:
+                return ''
+            return source[-size:]
+
+        return _vectorize_binary(text, count, _apply)
 
     def func_mid(text: Any, start: Any, length: Any) -> str:
         source = _ensure_text(text)
