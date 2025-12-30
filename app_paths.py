@@ -112,15 +112,9 @@ def migrate_legacy_files(project_root: Path) -> None:
             continue
         target = data_dir / name
         if target.exists():
-            backup = _backup_path(legacy_path)
-            try:
-                shutil.copy2(legacy_path, backup)
-                logger.info("Found legacy file %s but target exists; saved backup to %s", legacy_path, backup)
-            except Exception:
-                logger.exception("Failed to back up legacy file %s", legacy_path)
             continue
 
-        backup = _backup_path(legacy_path)
+        backup = _backup_path(target)
         try:
             shutil.copy2(legacy_path, target)
             shutil.copy2(legacy_path, backup)

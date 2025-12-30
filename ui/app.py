@@ -23,6 +23,7 @@ from http import HTTPStatus
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
+from app_paths import get_default_export_dir
 from data_transfer import (
     DataTransferError,
     export_all_data_to_excel,
@@ -673,7 +674,13 @@ class SpecsWindow(ctk.CTkToplevel):
                 self._restore_selection(iid)
                 return
             value = new_value
-        update_spec(sid, key, value)
+        try:
+            update_spec(sid, key, value)
+        except ValueError as exc:
+            show_error(str(exc))
+            self._refresh()
+            self.after(10, lambda: self._restore_selection(f"spec_{sid}"))
+            return
         self._refresh()
         self.after(10, lambda: self._restore_selection(f"spec_{sid}"))
 
@@ -708,7 +715,13 @@ class SpecsWindow(ctk.CTkToplevel):
         if not k:
             show_error("Введіть назву параметра.")
             return
-        update_spec(sid, k, v)
+        try:
+            update_spec(sid, k, v)
+        except ValueError as exc:
+            show_error(str(exc))
+            self._refresh()
+            self._restore_selection(f"spec_{sid}")
+            return
         self._refresh()
         self._restore_selection(f"spec_{sid}")
 
@@ -985,9 +998,14 @@ class SpecsWindow(ctk.CTkToplevel):
                 skipped += 1
                 continue
             if sid is not None:
-                update_spec(sid, normalized_key, normalized_value)
-                existing[lookup] = (sid, normalized_value, normalized_key)
-                updated += 1
+                try:
+                    update_spec(sid, normalized_key, normalized_value)
+                except ValueError as exc:
+                    show_error(str(exc))
+                    continue
+                else:
+                    existing[lookup] = (sid, normalized_value, normalized_key)
+                    updated += 1
             else:
                 new_id = insert_spec(self.model_id, normalized_key, normalized_value)
                 existing[lookup] = (new_id, normalized_value, normalized_key)
@@ -4185,7 +4203,8 @@ class App(ctk.CTk):
         path_frame = ctk.CTkFrame(right)
         path_frame.pack(fill="x", padx=10, pady=(4, 6))
         ctk.CTkLabel(path_frame, text="Папка збереження:").pack(anchor="w", padx=6, pady=(4, 4))
-        self.out_folder_var = tk.StringVar(value=os.getcwd())
+        default_export_dir = str(get_default_export_dir())
+        self.out_folder_var = tk.StringVar(value=default_export_dir)
         self.out_folder_entry = ctk.CTkEntry(path_frame, textvariable=self.out_folder_var)
         self.out_folder_entry.pack(fill="x", padx=6, pady=(0, 4))
         self._bind_clipboard_shortcuts(self.out_folder_entry)
@@ -4856,9 +4875,21 @@ class App(ctk.CTk):
             return None
 
         export_format = self.export_fmt_var.get() if hasattr(self, "export_fmt_var") else "JSON (.json)"
-        output_folder = self.out_folder_var.get().strip() if hasattr(self, "out_folder_var") else os.getcwd()
-        if not output_folder:
-            output_folder = os.getcwd()
+        default_export_dir = str(get_default_export_dir())
+        output_folder_raw = self.out_folder_var.get().strip() if hasattr(self, "out_folder_var") else default_export_dir
+        if not output_folder_raw:
+            output_folder = default_export_dir
+        else:
+            candidate = Path(output_folder_raw).expanduser()
+            if candidate.is_dir():
+                output_folder = str(candidate)
+            else:
+                output_folder = default_export_dir
+        if hasattr(self, "out_folder_var"):
+            try:
+                self.out_folder_var.set(output_folder)
+            except Exception:
+                pass
 
         context: Dict[str, object] = {
             "film_types": list(selected_types),

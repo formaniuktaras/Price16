@@ -1,5 +1,6 @@
 from datetime import datetime
 
+import pytest
 
 import database
 
@@ -170,6 +171,21 @@ def test_insert_spec_upserts_duplicate_key():
     assert first_id == second_id
     specs = database.get_specs(model_id)
     assert specs == [(first_id, "Duplicate", "Second")]
+
+
+def test_update_spec_duplicate_key_raises_value_error():
+    model_id = _prepare_model()
+    first_id = database.insert_spec(model_id, "Key1", "Value1")
+    second_id = database.insert_spec(model_id, "Key2", "Value2")
+
+    assert first_id and second_id
+
+    with pytest.raises(ValueError):
+        database.update_spec(second_id, "Key1", "Updated")
+
+    specs = database.get_specs(model_id)
+    assert (first_id, "Key1", "Value1") in specs
+    assert (second_id, "Key2", "Value2") in specs
 
 
 def test_load_specs_map_chunks_large_id_list():

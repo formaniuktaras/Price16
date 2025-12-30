@@ -26,6 +26,18 @@ class DummyAutoFilter:
         self.ref = None
 
 
+class DummyDimension:
+    def __init__(self):
+        self.width = None
+
+
+class DummyColumnDimensions(dict):
+    def __getitem__(self, key):
+        if key not in self:
+            self[key] = DummyDimension()
+        return super().__getitem__(key)
+
+
 class DummySheet:
     def __init__(self):
         self.rows = []
@@ -33,7 +45,7 @@ class DummySheet:
         self.title = ""
         self.freeze_panes = None
         self.auto_filter = DummyAutoFilter()
-        self.column_dimensions = {}
+        self.column_dimensions = DummyColumnDimensions()
 
     @property
     def max_row(self):
