@@ -1453,15 +1453,17 @@ def export_products(records: list, columns: list, fmt: str, folder: str):
                         dimension = None
                     if dimension is None:
                         try:
-                            sheet.column_dimensions[letter] = width
-                            continue
+                            dimension = sheet.column_dimensions[letter]
                         except Exception:
                             LOGGER.debug("Не вдалося призначити ширину колонки %s", letter, exc_info=True)
                             continue
                     try:
                         dimension.width = width
                     except Exception:
-                        sheet.column_dimensions[letter] = width
+                        try:
+                            sheet.column_dimensions[letter].width = width
+                        except Exception:
+                            LOGGER.debug("Не вдалося призначити ширину колонки %s", letter, exc_info=True)
 
             if alignment is not None and hasattr(sheet, "iter_rows"):
                 try:

@@ -394,12 +394,28 @@ def update_spec(spec_id: int, key: str, value: str) -> None:
         return
     conn = db_connect()
     cur = conn.cursor()
-    cur.execute(
-        "UPDATE model_specs SET key=?, value=? WHERE id=?",
-        (key, value, spec_id),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        cur.execute("SELECT model_id FROM model_specs WHERE id=?", (spec_id,))
+        row = cur.fetchone()
+        if row is None:
+            return
+        model_id = row[0]
+        cur.execute(
+            "SELECT 1 FROM model_specs WHERE model_id=? AND key=? AND id<>?",
+            (model_id, key, spec_id),
+        )
+        if cur.fetchone():
+            raise ValueError("Параметр з таким ключем вже існує для цієї моделі.")
+        cur.execute(
+            "UPDATE model_specs SET key=?, value=? WHERE id=?",
+            (key, value, spec_id),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError as exc:
+        conn.rollback()
+        raise ValueError("Не вдалося оновити характеристику: ключ має бути унікальним для моделі.") from exc
+    finally:
+        conn.close()
 
 
 def delete_spec(spec_id: int) -> None:
