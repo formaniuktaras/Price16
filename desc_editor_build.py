@@ -2,12 +2,18 @@
 from __future__ import annotations
 
 import argparse
+import json
+import logging
+import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Iterable, Sequence
+
+from app_paths import get_locks_dir
 
 ROOT_DIR = Path(__file__).resolve().parent
 EDITOR_ROOT = ROOT_DIR / "desc-editor"
@@ -15,6 +21,10 @@ DIST_DIR = EDITOR_ROOT / "dist"
 NODE_MODULES = EDITOR_ROOT / "node_modules"
 INSTALL_STAMP = NODE_MODULES / ".install-stamp"
 BUILD_STAMP = DIST_DIR / ".build-stamp"
+LOCK_MAX_AGE_SECONDS = 600
+LOCK_FILENAME = "desc_editor_build.lock"
+
+LOGGER = logging.getLogger(__name__)
 
 
 class DescEditorBuildError(RuntimeError):
@@ -22,6 +32,8 @@ class DescEditorBuildError(RuntimeError):
 
 
 __all__ = ["ensure_desc_editor_built", "DescEditorBuildError"]
+
+_BUILD_LOCK = threading.Lock()
 
 
 def _iter_files(paths: Sequence[Path]) -> Iterable[Path]:
@@ -96,6 +108,48 @@ def _run_command(command: Sequence[str], *, cwd: Path, quiet: bool = False) -> N
         raise DescEditorBuildError(f"Не вдалося виконати {' '.join(command)}: команда не знайдена") from exc
 
 
+def _lock_file_path() -> Path:
+    locks_dir = get_locks_dir()
+    locks_dir.mkdir(parents=True, exist_ok=True)
+    return locks_dir / LOCK_FILENAME
+
+
+def _acquire_build_lock() -> Path:
+    lock_path = _lock_file_path()
+    now = time.time()
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                age = now - lock_path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            if age < LOCK_MAX_AGE_SECONDS:
+                raise DescEditorBuildError("Збірка редактора вже виконується (lockfile присутній).")
+            try:
+                lock_path.unlink()
+                LOGGER.warning("Виявлено застарілий lockfile для збірки редактора, видалено: %s", lock_path)
+            except OSError as exc:
+                raise DescEditorBuildError(
+                    "Не вдалося звільнити застарілий lockfile збірки редактора."
+                ) from exc
+            continue
+        else:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({"pid": os.getpid(), "timestamp": now}))
+            return lock_path
+
+
+def _release_build_lock(lock_path: Path) -> None:
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        return
+    except Exception:
+        LOGGER.exception("Не вдалося видалити lockfile збірки редактора: %s", lock_path)
+
+
 def ensure_desc_editor_built(
     force: bool = False,
     *,
@@ -104,6 +158,29 @@ def ensure_desc_editor_built(
     quiet: bool = False,
 ) -> Path:
     """Ensure that the description editor bundle is built and return the dist path."""
+    lock_path: Path | None = None
+    with _BUILD_LOCK:
+        lock_path = _acquire_build_lock()
+        try:
+            return _ensure_desc_editor_built_impl(
+                force=force,
+                install=install,
+                npm_executable=npm_executable,
+                quiet=quiet,
+            )
+        finally:
+            if lock_path:
+                _release_build_lock(lock_path)
+
+
+def _ensure_desc_editor_built_impl(
+    force: bool = False,
+    *,
+    install: bool = True,
+    npm_executable: str | None = None,
+    quiet: bool = False,
+) -> Path:
+    """Internal implementation to allow lock handling around the build process."""
     if not EDITOR_ROOT.exists():
         raise DescEditorBuildError("Каталог desc-editor відсутній у репозиторії.")
 

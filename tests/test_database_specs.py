@@ -4,9 +4,7 @@ from datetime import datetime
 import database
 
 
-def test_export_catalog_dump_returns_entities(tmp_path, monkeypatch):
-    db_path = tmp_path / "catalog.db"
-    monkeypatch.setattr(database, "DB_FILE", str(db_path))
+def test_export_catalog_dump_returns_entities():
     database.init_db()
 
     database.add_category("Категорія A")
@@ -26,9 +24,7 @@ def test_export_catalog_dump_returns_entities(tmp_path, monkeypatch):
     assert any(entry["model_id"] == model_id and entry["key"] == "Ключ" for entry in dump["specs"])
 
 
-def test_import_catalog_dump_replaces_data(tmp_path, monkeypatch):
-    db_path = tmp_path / "catalog.db"
-    monkeypatch.setattr(database, "DB_FILE", str(db_path))
+def test_import_catalog_dump_replaces_data():
     database.init_db()
 
     database.add_category("OldCat")
@@ -72,9 +68,7 @@ def test_import_catalog_dump_replaces_data(tmp_path, monkeypatch):
     assert [(sid, key, value) for sid, key, value in specs] == [(1, "Новий ключ", "123")]
 
 
-def _prepare_model(tmp_path, monkeypatch) -> int:
-    db_path = tmp_path / "specs.db"
-    monkeypatch.setattr(database, "DB_FILE", str(db_path))
+def _prepare_model() -> int:
     database.init_db()
 
     database.add_category("Тестова")
@@ -91,8 +85,8 @@ def _prepare_model(tmp_path, monkeypatch) -> int:
     return model_id
 
 
-def test_insert_spec_returns_row_id(tmp_path, monkeypatch):
-    model_id = _prepare_model(tmp_path, monkeypatch)
+def test_insert_spec_returns_row_id():
+    model_id = _prepare_model()
 
     spec_id = database.insert_spec(model_id, "Параметр", "Значення")
     assert isinstance(spec_id, int) and spec_id > 0
@@ -105,8 +99,8 @@ def test_insert_spec_returns_row_id(tmp_path, monkeypatch):
     assert value == "Значення"
 
 
-def test_replace_specs_resets_previous_values(tmp_path, monkeypatch):
-    model_id = _prepare_model(tmp_path, monkeypatch)
+def test_replace_specs_resets_previous_values():
+    model_id = _prepare_model()
     first_id = database.insert_spec(model_id, "Old", "123")
     assert first_id
 
@@ -140,9 +134,7 @@ def test_replace_specs_resets_previous_values(tmp_path, monkeypatch):
     ]
 
 
-def test_catalog_entries_include_created_at(tmp_path, monkeypatch):
-    db_path = tmp_path / "catalog.db"
-    monkeypatch.setattr(database, "DB_FILE", str(db_path))
+def test_catalog_entries_include_created_at():
     database.init_db()
 
     database.add_category("TestCat")
@@ -168,3 +160,36 @@ def test_catalog_entries_include_created_at(tmp_path, monkeypatch):
     model_id, _model_name, model_created = next(entry for entry in models_full if entry[1] == "TestModel")
     assert model_created
     datetime.fromisoformat(model_created)
+
+
+def test_insert_spec_upserts_duplicate_key():
+    model_id = _prepare_model()
+    first_id = database.insert_spec(model_id, "Duplicate", "First")
+    second_id = database.insert_spec(model_id, "Duplicate", "Second")
+
+    assert first_id == second_id
+    specs = database.get_specs(model_id)
+    assert specs == [(first_id, "Duplicate", "Second")]
+
+
+def test_load_specs_map_chunks_large_id_list():
+    database.init_db()
+    database.add_category("ChunkCat")
+    cat_id = next(cid for cid, name in database.get_categories() if name == "ChunkCat")
+    database.add_brand(cat_id, "ChunkBrand")
+    brand_id = next(bid for bid, name in database.get_brands(cat_id) if name == "ChunkBrand")
+
+    model_ids = []
+    for idx in range(5):
+        database.add_model(brand_id, f"Model-{idx}")
+        mid = next(mid for mid, name in database.get_models(brand_id) if name == f"Model-{idx}")
+        database.insert_spec(mid, f"Key-{idx}", f"Value-{idx}")
+        model_ids.append(mid)
+
+    many_ids = list(range(1, 2505))
+    many_ids.extend(model_ids)
+
+    specs_map = database.load_specs_map(many_ids)
+
+    for idx, mid in enumerate(model_ids):
+        assert specs_map[mid][f"Key-{idx}"] == f"Value-{idx}"

@@ -15,23 +15,59 @@ sys.modules.setdefault("jinja2", jinja2_stub)
 import templates_service as ts
 
 
+class DummyCell:
+    def __init__(self, value):
+        self.value = value
+        self.alignment = None
+
+
+class DummyAutoFilter:
+    def __init__(self):
+        self.ref = None
+
+
 class DummySheet:
     def __init__(self):
         self.rows = []
+        self._cells = []
         self.title = ""
+        self.freeze_panes = None
+        self.auto_filter = DummyAutoFilter()
+        self.column_dimensions = {}
+
+    @property
+    def max_row(self):
+        return len(self._cells)
 
     def append(self, row):
-        self.rows.append(tuple(row))
+        values = tuple(row)
+        self.rows.append(values)
+        self._cells.append([DummyCell(value) for value in values])
+
+    def iter_rows(self, min_row=1, max_row=None, max_col=None):
+        start = max(min_row - 1, 0)
+        end = max_row if max_row is not None else len(self._cells)
+        for row in self._cells[start:end]:
+            cells = list(row)
+            if max_col is not None:
+                if len(cells) < max_col:
+                    cells.extend(DummyCell("") for _ in range(max_col - len(cells)))
+                cells = cells[:max_col]
+            yield tuple(cells)
 
 
 class DummyWorkbook:
-    def __init__(self, save_exc):
+    def __init__(self, save_exc=None):
         self.active = DummySheet()
         self._save_exc = save_exc
         self.closed = False
+        self.saved = None
 
     def save(self, filename):
-        raise self._save_exc
+        if self._save_exc:
+            raise self._save_exc
+        self.saved = filename
+        Path(filename).touch()
 
     def close(self):
         self.closed = True
@@ -80,6 +116,34 @@ def test_export_products_os_error(monkeypatch, tmp_path, excel_context):
 
     assert excinfo.value.code == ts.EXPORT_ERR_OS_ERROR
     assert "disk full" in excinfo.value.message
+
+
+def test_export_products_applies_formatting(monkeypatch, tmp_path, excel_context):
+    created = {}
+
+    def make_workbook():
+        wb = DummyWorkbook()
+        created["wb"] = wb
+        return wb
+
+    monkeypatch.setattr(ts, "Workbook", make_workbook)
+
+    output = ts.export_products([["value", "long text"]], ["col", "desc"], ts.EXCEL_FORMAT_LABEL, str(tmp_path))
+
+    sheet = created["wb"].active
+    assert sheet.freeze_panes == "A2"
+    assert sheet.auto_filter.ref and sheet.auto_filter.ref.startswith("A1:")
+    width_value = sheet.column_dimensions.get("B")
+    if hasattr(width_value, "width"):
+        width = width_value.width
+    else:
+        width = width_value
+    assert width is not None and width >= 10
+    alignments = [
+        cell.alignment for row in sheet.iter_rows(max_row=sheet.max_row, max_col=2) for cell in row
+    ]
+    assert any(getattr(al, "wrap_text", False) for al in alignments if al is not None)
+    assert Path(output).exists()
 
 
 def test_export_products_unknown_format():
