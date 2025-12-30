@@ -3,16 +3,16 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import os
 import re
-import sys
 from copy import deepcopy
 from datetime import datetime
+from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-import tkinter as tk
-from tkinter import messagebox
-
+from app_paths import get_config_path
+from errors import MissingDependencyError
 from formula_engine import FormulaEngine, FormulaError
 
 from database import collect_models, load_specs_map
@@ -71,25 +71,6 @@ def _relativedelta_helper(*args, **kwargs):
     return _relativedelta(*args, **kwargs)
 
 APP_TITLE = "Prom Generator"
-
-
-def _show_dependency_error(message: str) -> None:
-    """Display a blocking error for a missing runtime dependency."""
-
-    root = None
-    try:
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showerror(APP_TITLE, message)
-    except Exception:
-        print(message, file=sys.stderr)
-    finally:
-        if root is not None:
-            try:
-                root.destroy()
-            except Exception:
-                pass
-
 
 DEPENDENCY_WARNINGS: List[str] = []
 
@@ -156,16 +137,16 @@ else:
 
 try:
     from jinja2 import Template, TemplateError
-except ModuleNotFoundError:
-    _show_dependency_error(
-        "Бібліотека Jinja2 не знайдена.\n"
-        "Встановіть її командою 'pip install jinja2' і перезапустіть застосунок."
-    )
-    sys.exit(1)
+except ModuleNotFoundError as exc:
+    raise MissingDependencyError(
+        "Бібліотека Jinja2 не знайдена. Встановіть її командою 'pip install jinja2'."
+    ) from exc
 
-TEMPLATES_FILE = "templates.json"
-EXPORT_FIELDS_FILE = "export_fields.json"
-TITLE_TAGS_FILE = "title_tags_templates.json"
+LOGGER = logging.getLogger(__name__)
+
+TEMPLATES_FILENAME = "templates.json"
+EXPORT_FIELDS_FILENAME = "export_fields.json"
+TITLE_TAGS_FILENAME = "title_tags_templates.json"
 FILM_TYPE_DEFAULT_LABEL = "Універсальний шаблон"
 CATEGORY_SCOPE_DEFAULT_LABEL = "Для всіх категорій"
 # Ключ для шаблонів опису, які застосовуються для всіх категорій
@@ -177,6 +158,64 @@ DEFAULT_TEMPLATE_LANGUAGES = [
     {"code": "ru", "label": "Російська"},
     {"code": "en", "label": "English"},
 ]
+
+
+def _config_path(filename: str) -> Path:
+    path = get_config_path(filename)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _write_json_config(path: Path, data) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _backup_corrupt_config(path: Path) -> Optional[Path]:
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup = path.with_name(f"{path.stem}.bad_{ts}{path.suffix}")
+    try:
+        path.rename(backup)
+        return backup
+    except OSError:
+        try:
+            data = path.read_bytes()
+        except OSError:
+            LOGGER.exception("Не вдалося зчитати пошкоджений конфіг %s для бекапу", path)
+            return None
+        try:
+            backup.write_bytes(data)
+            path.unlink(missing_ok=True)
+            return backup
+        except Exception:
+            LOGGER.exception("Не вдалося створити бекап для %s", path)
+            return None
+
+
+def _load_json_config(path: Path, default_factory: Callable[[], object], expected_type) -> object:
+    if not path.exists():
+        data = default_factory()
+        _write_json_config(path, data)
+        return data
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        backup = _backup_corrupt_config(path)
+        LOGGER.warning(
+            "Файл %s пошкоджено, створено бекап %s і відновлено значення за замовчуванням",
+            path,
+            backup,
+            exc_info=exc,
+        )
+        data = default_factory()
+        _write_json_config(path, data)
+        return data
+    if not isinstance(data, expected_type):
+        data = default_factory()
+        _write_json_config(path, data)
+    return data
 
 
 def _normalize_language_definitions(raw_languages):
@@ -487,23 +526,8 @@ def _build_title_tags_defaults(film_type_names, base_title, base_tags):
 
 
 def load_templates():
-    if not os.path.exists(TEMPLATES_FILE):
-        defaults = deepcopy(DEFAULT_TEMPLATES)
-        save_templates(defaults)
-        return defaults
-
-    try:
-        with open(TEMPLATES_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        defaults = deepcopy(DEFAULT_TEMPLATES)
-        save_templates(defaults)
-        return defaults
-
-    if not isinstance(data, dict):
-        defaults = deepcopy(DEFAULT_TEMPLATES)
-        save_templates(defaults)
-        return defaults
+    path = _config_path(TEMPLATES_FILENAME)
+    data = _load_json_config(path, lambda: deepcopy(DEFAULT_TEMPLATES), dict)
 
     for k, v in DEFAULT_TEMPLATES.items():
         if k not in data:
@@ -515,8 +539,8 @@ def load_templates():
 
 
 def save_templates(dct):
-    with open(TEMPLATES_FILE, "w", encoding="utf-8") as f:
-        json.dump(dct, f, ensure_ascii=False, indent=2)
+    path = _config_path(TEMPLATES_FILENAME)
+    _write_json_config(path, dct)
 
 
 def _normalize_title_tags_block(block: dict, fallback: dict) -> dict:
@@ -544,16 +568,8 @@ def load_title_tags_templates(templates: dict):
     base_tags = templates.get("tags_template", DEFAULT_TEMPLATES["tags_template"])
     defaults = _build_title_tags_defaults(film_type_names, base_title, base_tags)
 
-    if not os.path.exists(TITLE_TAGS_FILE):
-        save_title_tags_templates(defaults)
-        return defaults
-
-    with open(TITLE_TAGS_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    if not isinstance(data, dict):
-        save_title_tags_templates(defaults)
-        return defaults
+    path = _config_path(TITLE_TAGS_FILENAME)
+    data = _load_json_config(path, lambda: deepcopy(defaults), dict)
 
     changed = False
 
@@ -621,8 +637,8 @@ def load_title_tags_templates(templates: dict):
 
 
 def save_title_tags_templates(dct):
-    with open(TITLE_TAGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(dct, f, ensure_ascii=False, indent=2)
+    path = _config_path(TITLE_TAGS_FILENAME)
+    _write_json_config(path, dct)
 
 
 def resolve_title_tags(
@@ -701,23 +717,8 @@ def resolve_title_tags(
 
 
 def load_export_fields():
-    if not os.path.exists(EXPORT_FIELDS_FILE):
-        defaults = _copy_default_export_fields()
-        save_export_fields(defaults)
-        return defaults
-
-    try:
-        with open(EXPORT_FIELDS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        defaults = _copy_default_export_fields()
-        save_export_fields(defaults)
-        return defaults
-
-    if not isinstance(data, list):
-        defaults = _copy_default_export_fields()
-        save_export_fields(defaults)
-        return defaults
+    path = _config_path(EXPORT_FIELDS_FILENAME)
+    data = _load_json_config(path, _copy_default_export_fields, list)
 
     normalized = []
     changed = False
@@ -815,8 +816,8 @@ def save_export_fields(fields: list):
             }
         )
 
-    with open(EXPORT_FIELDS_FILE, "w", encoding="utf-8") as f:
-        json.dump(sanitized, f, ensure_ascii=False, indent=2)
+    path = _config_path(EXPORT_FIELDS_FILENAME)
+    _write_json_config(path, sanitized)
 
     return sanitized
 
@@ -1392,12 +1393,87 @@ def export_products(records: list, columns: list, fmt: str, folder: str):
         sheet = workbook.active
         sheet.title = "Products"
 
+        column_widths: List[int] = []
         if columns:
             sheet.append(columns)
+            column_widths = [max(10, min(60, len(str(col) if col is not None else ""))) for col in columns]
 
         for record in records:
             row = _row_to_values(record, columns)
+            if column_widths:
+                for idx, value in enumerate(row):
+                    length = len(str(value) if value is not None else "")
+                    column_widths[idx] = min(60, max(column_widths[idx], max(10, length)))
             sheet.append(row)
+
+        if columns:
+            try:
+                sheet.freeze_panes = "A2"
+            except Exception:
+                LOGGER.debug("Не вдалося зафіксувати рядок заголовків у Excel", exc_info=True)
+
+            try:
+                from openpyxl.utils import get_column_letter as _get_column_letter
+            except Exception:  # pragma: no cover - fallback when utils unavailable
+                _get_column_letter = None
+            try:
+                from openpyxl.styles import Alignment as _Alignment
+            except Exception:  # pragma: no cover - fallback when styles unavailable
+                _Alignment = None
+
+            def _column_letter(idx: int) -> str:
+                if _get_column_letter is not None:
+                    return _get_column_letter(idx)
+                base = ord("A") + (idx - 1)
+                if 0 <= base < 26 + ord("A"):
+                    return chr(base)
+                return f"COL{idx}"
+
+            try:
+                sheet.auto_filter.ref = f"A1:{_column_letter(len(columns))}1"
+            except Exception:
+                LOGGER.debug("Не вдалося застосувати автофільтр до Excel-аркуша", exc_info=True)
+
+            if _Alignment is not None:
+                alignment = _Alignment(wrap_text=True)
+            else:
+                class _SimpleAlignment:  # pragma: no cover - fallback for limited stubs
+                    def __init__(self, wrap_text: bool = False):
+                        self.wrap_text = wrap_text
+
+                alignment = _SimpleAlignment(wrap_text=True)
+
+            if hasattr(sheet, "column_dimensions") and column_widths:
+                for idx, width in enumerate(column_widths, start=1):
+                    letter = _column_letter(idx)
+                    dimension = None
+                    try:
+                        dimension = sheet.column_dimensions.get(letter)
+                    except Exception:
+                        dimension = None
+                    if dimension is None:
+                        try:
+                            sheet.column_dimensions[letter] = width
+                            continue
+                        except Exception:
+                            LOGGER.debug("Не вдалося призначити ширину колонки %s", letter, exc_info=True)
+                            continue
+                    try:
+                        dimension.width = width
+                    except Exception:
+                        sheet.column_dimensions[letter] = width
+
+            if alignment is not None and hasattr(sheet, "iter_rows"):
+                try:
+                    max_row = getattr(sheet, "max_row", len(getattr(sheet, "rows", [])))
+                    for row in sheet.iter_rows(min_row=1, max_row=max_row, max_col=len(columns)):
+                        for cell in row:
+                            try:
+                                cell.alignment = alignment
+                            except Exception:
+                                pass
+                except Exception:
+                    LOGGER.debug("Не вдалося застосувати перенесення тексту у клітинках Excel", exc_info=True)
 
         try:
             workbook.save(out_products)

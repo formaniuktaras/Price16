@@ -48,7 +48,6 @@ from templates_service import (
     save_templates,
     save_title_tags_templates,
     _title_tags_block,
-    _show_dependency_error,
     _normalize_language_definitions,
     _normalize_export_field_languages,
     _normalize_title_tags_block,
@@ -86,6 +85,7 @@ from formula_engine import FormulaEngine, FormulaError
 from specs_io import format_specs_for_clipboard, parse_specs_payload
 
 from desc_editor_build import DescEditorBuildError, ensure_desc_editor_built
+from errors import MissingDependencyError
 
 logger = logging.getLogger(__name__)
 
@@ -95,12 +95,10 @@ DESC_EDITOR_ENTRY = DESC_EDITOR_DIST / "index.html"
 
 try:
     import customtkinter as ctk
-except ModuleNotFoundError:
-    _show_dependency_error(
-        "Бібліотека CustomTkinter не знайдена.\n"
-        "Встановіть її командою 'pip install customtkinter' і перезапустіть застосунок."
-    )
-    sys.exit(1)
+except ModuleNotFoundError as exc:
+    raise MissingDependencyError(
+        "Бібліотека CustomTkinter не знайдена. Встановіть її командою 'pip install customtkinter'."
+    ) from exc
 
 _INPUT_SPLIT_RE = re.compile(r"[\n\r,;\u201a\u201e\uFF0C\u3001]+")
 def split_catalog_input(raw: str):
@@ -5093,4 +5091,3 @@ class App(ctk.CTk):
         self._schedule_progress_idle()
         if products_file:
             show_info(f"✅ Згенеровано {row_count} рядків.\nФайл експорту: {products_file}")
-

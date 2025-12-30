@@ -1,17 +1,47 @@
 """Database access layer for catalog entities and specs."""
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Literal, overload
 
-DB_FILE = "catalog.db"
+from app_paths import get_db_path
+
+LOGGER = logging.getLogger(__name__)
+
+# Retain the symbol for backward compatibility, but prefer get_db_path().
+DB_FILE = str(get_db_path())
 
 
 def db_connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_FILE)
+    db_path = get_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def _deduplicate_model_specs(cur: sqlite3.Cursor, conn: sqlite3.Connection) -> None:
+    cur.execute(
+        """
+        SELECT model_id, key, MAX(id) AS keep_id, COUNT(*) AS cnt
+        FROM model_specs
+        GROUP BY model_id, key
+        HAVING cnt > 1
+        """
+    )
+    rows = cur.fetchall()
+    total_removed = 0
+    for model_id, key, keep_id, _cnt in rows:
+        cur.execute(
+            "DELETE FROM model_specs WHERE model_id=? AND key=? AND id<>?",
+            (model_id, key, keep_id),
+        )
+        total_removed += cur.rowcount
+    if total_removed:
+        LOGGER.info("Removed %s duplicate model_specs rows before adding unique index", total_removed)
+        conn.commit()
 
 
 def init_db() -> None:
@@ -75,6 +105,12 @@ def init_db() -> None:
     ensure_created_at("categories")
     ensure_created_at("brands")
     ensure_created_at("models")
+
+    _deduplicate_model_specs(cur, conn)
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_model_specs_model_key ON model_specs(model_id, key)"
+    )
+    conn.commit()
 
     cur.execute("SELECT COUNT(*) FROM categories")
     if cur.fetchone()[0] == 0:
@@ -318,14 +354,38 @@ def insert_spec(model_id: int, key: str, value: str) -> Optional[int]:
         return None
     conn = db_connect()
     cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO model_specs(model_id, key, value) VALUES(?,?,?)",
-        (model_id, key, value),
-    )
-    conn.commit()
-    inserted_id = cur.lastrowid
-    conn.close()
-    return inserted_id
+    try:
+        cur.execute(
+            """
+            INSERT INTO model_specs(model_id, key, value) VALUES(?,?,?)
+            ON CONFLICT(model_id, key) DO UPDATE SET value=excluded.value
+            RETURNING id
+            """,
+            (model_id, key, value),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        inserted_id = row[0] if row else None
+        return inserted_id
+    except sqlite3.OperationalError:
+        cur.execute(
+            """
+            INSERT INTO model_specs(model_id, key, value) VALUES(?,?,?)
+            ON CONFLICT(model_id, key) DO UPDATE SET value=excluded.value
+            """,
+            (model_id, key, value),
+        )
+        conn.commit()
+        cur.execute(
+            "SELECT id FROM model_specs WHERE model_id=? AND key=?",
+            (model_id, key),
+        )
+        row = cur.fetchone()
+        inserted_id = row[0] if row else None
+        conn.commit()
+        return inserted_id
+    finally:
+        conn.close()
 
 
 def update_spec(spec_id: int, key: str, value: str) -> None:
@@ -387,29 +447,34 @@ def load_specs_map(model_ids: Iterable[int]) -> Dict[int, Dict[str, Optional[str
     if not unique_ids:
         return {}
 
-    placeholders = ",".join(["?"] * len(unique_ids))
-    query = f"""
-        SELECT model_id, key, value
-        FROM model_specs
-        WHERE model_id IN ({placeholders})
-        ORDER BY model_id, id
-    """
+    def _chunks(seq, size):
+        for i in range(0, len(seq), size):
+            yield seq[i : i + size]
+
+    specs_map: Dict[int, Dict[str, Optional[str]]] = {}
 
     conn = db_connect()
     cur = conn.cursor()
-    cur.execute(query, tuple(unique_ids))
-    rows = cur.fetchall()
-    conn.close()
+    for chunk in _chunks(unique_ids, 500):
+        placeholders = ",".join(["?"] * len(chunk))
+        query = f"""
+            SELECT model_id, key, value
+            FROM model_specs
+            WHERE model_id IN ({placeholders})
+            ORDER BY model_id, id
+        """
+        cur.execute(query, tuple(chunk))
+        rows = cur.fetchall()
 
-    specs_map: Dict[int, Dict[str, Optional[str]]] = {}
-    for model_id, key, value in rows:
-        if isinstance(key, str):
-            key = key.strip()
-        if isinstance(value, str):
-            value = value.strip()
-        if not key:
-            continue
-        specs_map.setdefault(model_id, {})[key] = value
+        for model_id, key, value in rows:
+            if isinstance(key, str):
+                key = key.strip()
+            if isinstance(value, str):
+                value = value.strip()
+            if not key:
+                continue
+            specs_map.setdefault(model_id, {})[key] = value
+    conn.close()
     return specs_map
 
 
