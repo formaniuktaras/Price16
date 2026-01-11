@@ -5,6 +5,7 @@ import csv
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
 import queue
@@ -23,7 +24,7 @@ from http import HTTPStatus
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from app_paths import get_default_export_dir
+from app_paths import get_data_dir, get_default_export_dir, get_logs_dir
 from data_transfer import (
     DataTransferError,
     export_all_data_to_excel,
@@ -87,6 +88,9 @@ from specs_io import format_specs_for_clipboard, parse_specs_payload
 
 from desc_editor_build import DescEditorBuildError, ensure_desc_editor_built
 from errors import MissingDependencyError
+from settings_service import load_settings, save_settings, validate_settings
+from ui.settings_dialog import SettingsDialog
+from ui.theme_manager import ThemeManager
 
 logger = logging.getLogger(__name__)
 
@@ -115,13 +119,17 @@ def split_catalog_input(raw: str):
     return unique
 
   
-def create_inline_entry(parent, text: str):
+def create_inline_entry(parent, text: str, theme_colors: Optional[Dict[str, str]] = None):
     entry = tk.Entry(parent)
     font = ctk.CTkFont()
     entry.configure(font=font)
     entry._ctk_font = font  # keep reference to avoid garbage collection
     mode = (ctk.get_appearance_mode() or "light").lower()
-    if mode == "dark":
+    if theme_colors:
+        bg = theme_colors.get("widget_fg", "#2b2b2b")
+        fg = theme_colors.get("text", "#f2f2f2")
+        border = theme_colors.get("border", "#565b5e")
+    elif mode == "dark":
         bg = "#2b2b2b"
         fg = "#f2f2f2"
         border = "#565b5e"
@@ -1114,7 +1122,10 @@ class App(ctk.CTk):
         self.title(APP_TITLE)
         self.geometry("1100x680")
         self.minsize(980, 640)
-        ctk.set_appearance_mode("dark")
+        self.settings = load_settings()
+        self.theme_manager = ThemeManager(self)
+        self.theme_manager.register(self, "background")
+        self.theme_manager.apply(self.settings, apply_widgets=False)
         ctk.set_default_color_theme("blue")
 
         self._setup_ttk_styles()
@@ -1187,6 +1198,8 @@ class App(ctk.CTk):
         self.generate_tree_buttons: List[ctk.CTkButton] = []
         self.choose_folder_button = None
         self.out_folder_entry = None
+        self.file_menu_button = None
+        self._file_menu = None
         # Compatibility: some flows expect the filmtype name variable to exist during tab
         # construction even if the dedicated film type tab is hidden. Older widgets access
         # the variable through the low-level Tk interpreter (self.tk), so expose it there
@@ -1201,6 +1214,7 @@ class App(ctk.CTk):
 
         self._build_header()
         self._build_tabs()
+        self._apply_settings(self.settings, persist=False, apply_widgets=True)
 
         # Початкові дані
         self._refresh_categories()
@@ -1228,12 +1242,18 @@ class App(ctk.CTk):
             except Exception:
                 pass
 
-        base_bg = "#1b1d21"
-        base_fg = "#f1f5f9"
-        highlight = "#1f6aa5"
+        theme_colors = self.theme_manager.colors or {}
+        theme_fonts = self.theme_manager.fonts or {}
+        base_bg = theme_colors.get("widget_fg", "#1b1d21")
+        base_fg = theme_colors.get("text", "#f1f5f9")
+        highlight = theme_colors.get("accent", "#1f6aa5")
 
-        body_font = ctk.CTkFont(size=13)
-        heading_font = ctk.CTkFont(size=13, weight="bold")
+        family = str(theme_fonts.get("family", "Segoe UI"))
+        body_size = int(theme_fonts.get("base_size", 13))
+        heading_size = int(theme_fonts.get("heading_size", 13))
+
+        body_font = ctk.CTkFont(family=family, size=body_size)
+        heading_font = ctk.CTkFont(family=family, size=heading_size, weight="bold")
 
         body_family = body_font.actual("family") or body_font.cget("family")
         heading_family = heading_font.actual("family") or heading_font.cget("family")
@@ -1794,18 +1814,89 @@ class App(ctk.CTk):
     def _build_header(self):
         top = ctk.CTkFrame(self)
         top.pack(fill="x", padx=10, pady=(10, 0))
-        ctk.CTkLabel(top, text=APP_TITLE, font=ctk.CTkFont(size=18, weight="bold")).pack(side="left")
+        self.header_frame = top
+        self.file_menu_button = ctk.CTkButton(
+            top,
+            text="Файл",
+            width=80,
+            command=self._open_file_menu,
+        )
+        self.file_menu_button.pack(side="left")
+        self.theme_manager.register(top, "surface")
+        self.theme_manager.register(self.file_menu_button, "menu_button")
 
-        self.theme_var = tk.StringVar(value="dark")
-        theme = ctk.CTkOptionMenu(top, values=["dark", "light", "system"], variable=self.theme_var, width=120,
-                                  command=lambda v: ctk.set_appearance_mode(v))
-        theme.set("dark")
-        theme.pack(side="right")
+    def _open_file_menu(self):
+        if self._file_menu is None:
+            menu = tk.Menu(self, tearoff=0)
+            menu.add_command(label="Налаштування...", command=self._open_settings_dialog)
+            menu.add_separator()
+            menu.add_command(label="Відкрити папку даних", command=self._open_data_folder)
+            menu.add_command(label="Відкрити папку логів", command=self._open_logs_folder)
+            menu.add_separator()
+            menu.add_command(label="Про програму", command=self._show_about)
+            menu.add_command(label="Вихід", command=self._handle_exit)
+            self._file_menu = menu
+        if self.file_menu_button is None:
+            return
+        x = self.file_menu_button.winfo_rootx()
+        y = self.file_menu_button.winfo_rooty() + self.file_menu_button.winfo_height()
+        try:
+            self._file_menu.tk_popup(x, y)
+        finally:
+            self._file_menu.grab_release()
+
+    def _open_settings_dialog(self):
+        SettingsDialog(self, self.settings, on_apply=self._on_settings_applied)
+
+    def _on_settings_applied(self, settings: Dict[str, object]) -> None:
+        validated = validate_settings(settings)
+        self._apply_settings(validated, persist=True, apply_widgets=True)
+
+    def _apply_settings(self, settings: Dict[str, object], *, persist: bool, apply_widgets: bool) -> None:
+        self.settings = settings
+        self.theme_manager.apply(settings, apply_widgets=apply_widgets)
+        self._setup_ttk_styles()
+        if persist:
+            save_settings(settings)
+        if self.out_folder_var is not None:
+            export_folder = settings.get("export_folder")
+            if isinstance(export_folder, str) and export_folder:
+                self.out_folder_var.set(export_folder)
+
+    def _handle_exit(self):
+        self.destroy()
+
+    def _show_about(self):
+        data_dir = get_data_dir()
+        messagebox.showinfo(
+            APP_TITLE,
+            f"{APP_TITLE}\nКаталог даних: {data_dir}",
+        )
+
+    def _open_data_folder(self):
+        self._open_path(get_data_dir())
+
+    def _open_logs_folder(self):
+        self._open_path(get_logs_dir())
+
+    def _open_path(self, path: Path):
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.run(["open", str(path)], check=False)
+            else:
+                subprocess.run(["xdg-open", str(path)], check=False)
+        except Exception:
+            logger.exception("Не вдалося відкрити шлях %s", path)
+            show_error("Не вдалося відкрити папку.")
 
     # -------- вкладки
     def _build_tabs(self):
         tabs = ctk.CTkTabview(self, width=1040, height=600)
         tabs.pack(fill="both", expand=True, padx=10, pady=10)
+        self.tabs = tabs
+        self.theme_manager.register(tabs, "tabview")
 
         self.tab_catalog   = tabs.add("Каталог")
         self.tab_templates = tabs.add("Шаблони")
@@ -1996,10 +2087,15 @@ class App(ctk.CTk):
         # Ліва колона: Категорії + Бренди
         left = ctk.CTkFrame(self.tab_catalog)
         left.pack(side="left", fill="both", expand=True, padx=(0,10), pady=10)
+        self.theme_manager.register(left, "surface")
 
         # Категорії
-        ctk.CTkLabel(left, text="Категорія").pack(anchor="w", padx=10, pady=(8,0))
-        cat_frame = ctk.CTkFrame(left); cat_frame.pack(fill="x", padx=10, pady=5)
+        cat_label = ctk.CTkLabel(left, text="Категорія")
+        cat_label.pack(anchor="w", padx=10, pady=(8,0))
+        self.theme_manager.register(cat_label, "label")
+        cat_frame = ctk.CTkFrame(left)
+        cat_frame.pack(fill="x", padx=10, pady=5)
+        self.theme_manager.register(cat_frame, "surface")
         self.cat_tree = ttk.Treeview(cat_frame, columns=("name",), show="headings", height=6)
         self.cat_tree.heading("name", text="Назва")
         self.cat_tree.column("name", width=260, anchor="w")
@@ -2010,18 +2106,30 @@ class App(ctk.CTk):
         self.cat_tree.bind("<Button-1>", lambda e: self._handle_tree_click(e, "cat", self.cat_tree), add="+")
         self.cat_tree.bind("<Delete>", lambda e: self._handle_tree_delete("cat"))
 
-        cat_ctrl = ctk.CTkFrame(left); cat_ctrl.pack(fill="x", padx=10, pady=(0,10))
+        cat_ctrl = ctk.CTkFrame(left)
+        cat_ctrl.pack(fill="x", padx=10, pady=(0,10))
+        self.theme_manager.register(cat_ctrl, "surface")
         self.cat_entry = ctk.CTkEntry(cat_ctrl, placeholder_text="Назва категорії")
         self.cat_entry.pack(side="left", fill="x", expand=True, padx=(0,5))
         self._bind_clipboard_shortcuts(self.cat_entry)
-        ctk.CTkButton(cat_ctrl, text="Додати", command=self._cat_add, width=90).pack(side="left", padx=3)
-        ctk.CTkButton(cat_ctrl, text="Перейменувати", command=self._cat_rename, width=120).pack(side="left", padx=3)
-        ctk.CTkButton(cat_ctrl, text="Видалити", command=self._cat_delete, width=90,
-                      fg_color="#8b0000", hover_color="#a40000").pack(side="left", padx=3)
+        self.theme_manager.register(self.cat_entry, "widget")
+        self.cat_add_button = ctk.CTkButton(cat_ctrl, text="Додати", command=self._cat_add, width=90)
+        self.cat_add_button.pack(side="left", padx=3)
+        self.theme_manager.register(self.cat_add_button, "accent_button")
+        self.cat_rename_button = ctk.CTkButton(cat_ctrl, text="Перейменувати", command=self._cat_rename, width=120)
+        self.cat_rename_button.pack(side="left", padx=3)
+        self.theme_manager.register(self.cat_rename_button, "accent_button")
+        self.cat_delete_button = ctk.CTkButton(cat_ctrl, text="Видалити", command=self._cat_delete, width=90)
+        self.cat_delete_button.pack(side="left", padx=3)
+        self.theme_manager.register(self.cat_delete_button, "danger_button")
 
         # Бренди
-        ctk.CTkLabel(left, text="Бренд").pack(anchor="w", padx=10, pady=(8,0))
-        brand_frame = ctk.CTkFrame(left); brand_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        brand_label = ctk.CTkLabel(left, text="Бренд")
+        brand_label.pack(anchor="w", padx=10, pady=(8,0))
+        self.theme_manager.register(brand_label, "label")
+        brand_frame = ctk.CTkFrame(left)
+        brand_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        self.theme_manager.register(brand_frame, "surface")
         self.brand_tree = ttk.Treeview(brand_frame, columns=("name",), show="headings", height=11)
         self.brand_tree.heading("name", text="Назва")
         self.brand_tree.column("name", width=260, anchor="w")
@@ -2032,21 +2140,34 @@ class App(ctk.CTk):
         self.brand_tree.bind("<Button-1>", lambda e: self._handle_tree_click(e, "brand", self.brand_tree), add="+")
         self.brand_tree.bind("<Delete>", lambda e: self._handle_tree_delete("brand"))
 
-        brand_ctrl = ctk.CTkFrame(left); brand_ctrl.pack(fill="x", padx=10, pady=(0,10))
+        brand_ctrl = ctk.CTkFrame(left)
+        brand_ctrl.pack(fill="x", padx=10, pady=(0,10))
+        self.theme_manager.register(brand_ctrl, "surface")
         self.brand_entry = ctk.CTkEntry(brand_ctrl, placeholder_text="Назва бренду")
         self.brand_entry.pack(side="left", fill="x", expand=True, padx=(0,5))
         self._bind_clipboard_shortcuts(self.brand_entry)
-        ctk.CTkButton(brand_ctrl, text="Додати", command=self._brand_add, width=90).pack(side="left", padx=3)
-        ctk.CTkButton(brand_ctrl, text="Перейменувати", command=self._brand_rename, width=120).pack(side="left", padx=3)
-        ctk.CTkButton(brand_ctrl, text="Видалити", command=self._brand_delete, width=90,
-                      fg_color="#8b0000", hover_color="#a40000").pack(side="left", padx=3)
+        self.theme_manager.register(self.brand_entry, "widget")
+        self.brand_add_button = ctk.CTkButton(brand_ctrl, text="Додати", command=self._brand_add, width=90)
+        self.brand_add_button.pack(side="left", padx=3)
+        self.theme_manager.register(self.brand_add_button, "accent_button")
+        self.brand_rename_button = ctk.CTkButton(brand_ctrl, text="Перейменувати", command=self._brand_rename, width=120)
+        self.brand_rename_button.pack(side="left", padx=3)
+        self.theme_manager.register(self.brand_rename_button, "accent_button")
+        self.brand_delete_button = ctk.CTkButton(brand_ctrl, text="Видалити", command=self._brand_delete, width=90)
+        self.brand_delete_button.pack(side="left", padx=3)
+        self.theme_manager.register(self.brand_delete_button, "danger_button")
 
         # Права колона: Моделі
         right = ctk.CTkFrame(self.tab_catalog)
         right.pack(side="left", fill="both", expand=True, padx=(10,0), pady=10)
+        self.theme_manager.register(right, "surface")
 
-        ctk.CTkLabel(right, text="Модель").pack(anchor="w", padx=10, pady=(8,0))
-        model_frame = ctk.CTkFrame(right); model_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        model_label = ctk.CTkLabel(right, text="Модель")
+        model_label.pack(anchor="w", padx=10, pady=(8,0))
+        self.theme_manager.register(model_label, "label")
+        model_frame = ctk.CTkFrame(right)
+        model_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        self.theme_manager.register(model_frame, "surface")
         self.model_tree = ttk.Treeview(model_frame, columns=("name",), show="headings", height=22)
         self.model_tree.heading("name", text="Назва")
         self.model_tree.column("name", width=360, anchor="w")
@@ -2057,15 +2178,25 @@ class App(ctk.CTk):
         self.model_tree.bind("<Double-1>", self._on_model_double_click, add="+")
         self.model_tree.bind("<Delete>", lambda e: self._handle_tree_delete("model"))
 
-        model_ctrl = ctk.CTkFrame(right); model_ctrl.pack(fill="x", padx=10, pady=(0,10))
+        model_ctrl = ctk.CTkFrame(right)
+        model_ctrl.pack(fill="x", padx=10, pady=(0,10))
+        self.theme_manager.register(model_ctrl, "surface")
         self.model_entry = ctk.CTkEntry(model_ctrl, placeholder_text="Назва моделі")
         self.model_entry.pack(side="left", fill="x", expand=True, padx=(0,5))
         self._bind_clipboard_shortcuts(self.model_entry)
-        ctk.CTkButton(model_ctrl, text="Додати", command=self._model_add, width=90).pack(side="left", padx=3)
-        ctk.CTkButton(model_ctrl, text="Перейменувати", command=self._model_rename, width=120).pack(side="left", padx=3)
-        ctk.CTkButton(model_ctrl, text="Видалити", command=self._model_delete, width=90,
-                      fg_color="#8b0000", hover_color="#a40000").pack(side="left", padx=3)
-        ctk.CTkButton(model_ctrl, text="Характеристики", command=self._open_specs, width=140).pack(side="left", padx=6)
+        self.theme_manager.register(self.model_entry, "widget")
+        self.model_add_button = ctk.CTkButton(model_ctrl, text="Додати", command=self._model_add, width=90)
+        self.model_add_button.pack(side="left", padx=3)
+        self.theme_manager.register(self.model_add_button, "accent_button")
+        self.model_rename_button = ctk.CTkButton(model_ctrl, text="Перейменувати", command=self._model_rename, width=120)
+        self.model_rename_button.pack(side="left", padx=3)
+        self.theme_manager.register(self.model_rename_button, "accent_button")
+        self.model_delete_button = ctk.CTkButton(model_ctrl, text="Видалити", command=self._model_delete, width=90)
+        self.model_delete_button.pack(side="left", padx=3)
+        self.theme_manager.register(self.model_delete_button, "danger_button")
+        self.model_specs_button = ctk.CTkButton(model_ctrl, text="Характеристики", command=self._open_specs, width=140)
+        self.model_specs_button.pack(side="left", padx=6)
+        self.theme_manager.register(self.model_specs_button, "accent_button")
 
     def _on_model_double_click(self, event):
         row = self.model_tree.identify_row(event.y)
@@ -2107,7 +2238,7 @@ class App(ctk.CTk):
             return
         if self._rename_entry is not None:
             self._finish_inline_rename(save=False)
-        entry = create_inline_entry(tree, original)
+        entry = create_inline_entry(tree, original, theme_colors=self.theme_manager.colors)
         x, y, width, height = bbox
         entry.place(x=x, y=y, width=width, height=height)
         self._rename_entry = entry
@@ -4203,11 +4334,12 @@ class App(ctk.CTk):
         path_frame = ctk.CTkFrame(right)
         path_frame.pack(fill="x", padx=10, pady=(4, 6))
         ctk.CTkLabel(path_frame, text="Папка збереження:").pack(anchor="w", padx=6, pady=(4, 4))
-        default_export_dir = str(get_default_export_dir())
+        default_export_dir = self.settings.get("export_folder") or str(get_default_export_dir())
         self.out_folder_var = tk.StringVar(value=default_export_dir)
         self.out_folder_entry = ctk.CTkEntry(path_frame, textvariable=self.out_folder_var)
         self.out_folder_entry.pack(fill="x", padx=6, pady=(0, 4))
         self._bind_clipboard_shortcuts(self.out_folder_entry)
+        self.theme_manager.register(self.out_folder_entry, "widget")
         self.choose_folder_button = ctk.CTkButton(
             path_frame,
             text="Обрати...",
@@ -4215,6 +4347,7 @@ class App(ctk.CTk):
             width=110,
         )
         self.choose_folder_button.pack(anchor="e", padx=6, pady=(0, 4))
+        self.theme_manager.register(self.choose_folder_button, "accent_button")
 
         languages_frame = ctk.CTkFrame(right)
         languages_frame.pack(fill="x", padx=10, pady=(4, 6))
@@ -4249,6 +4382,7 @@ class App(ctk.CTk):
             height=36,
         )
         self.generate_preview_button.pack(side="right", padx=6)
+        self.theme_manager.register(self.generate_preview_button, "accent_button")
         self.generate_run_button = ctk.CTkButton(
             action_row,
             text="Згенерувати",
@@ -4256,6 +4390,7 @@ class App(ctk.CTk):
             height=36,
         )
         self.generate_run_button.pack(side="right", padx=6)
+        self.theme_manager.register(self.generate_run_button, "accent_button")
 
         progress_frame = ctk.CTkFrame(right)
         progress_frame.pack(fill="x", padx=10, pady=(10, 0))
@@ -4824,7 +4959,10 @@ class App(ctk.CTk):
 
     def _choose_folder(self):
         folder = filedialog.askdirectory(title="Виберіть папку для файлів")
-        if folder: self.out_folder_var.set(folder)
+        if folder:
+            self.out_folder_var.set(folder)
+            self.settings["export_folder"] = folder
+            save_settings(self.settings)
 
     def _collect_generation_context(self) -> Optional[Dict[str, object]]:
         entries = getattr(self, "ft_vars", [])
