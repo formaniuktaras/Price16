@@ -6,12 +6,15 @@ from typing import Any, Callable, Dict, Optional
 
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import filedialog, ttk
+from tkinter import colorchooser, filedialog, messagebox, ttk
+import logging
 
 import customtkinter as ctk
 
 from app_paths import get_data_dir
-from settings_service import default_settings
+from settings_service import default_settings, normalize_hex_color
+
+logger = logging.getLogger(__name__)
 
 
 class SettingsDialog(ctk.CTkToplevel):
@@ -33,8 +36,17 @@ class SettingsDialog(ctk.CTkToplevel):
         self._on_apply = on_apply
         self._default_settings = default_settings()
         self._draft_settings = deepcopy(current_settings)
+        self._color_errors: set[str] = set()
+        self._color_entries: Dict[str, ctk.CTkEntry] = {}
+        self._color_swatches: Dict[str, ctk.CTkFrame] = {}
+        self._color_error_labels: Dict[str, ctk.CTkLabel] = {}
+        self._entry_border_colors: Dict[str, str] = {}
 
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+        self.bind("<Escape>", self._on_cancel_event)
+        self.bind("<Control-s>", self._on_apply_shortcut)
+        self.bind("<Control-S>", self._on_apply_shortcut)
+        self.bind("<Return>", self._on_ok_shortcut)
 
         self._build_ui()
         self._select_category("Загальні")
@@ -42,14 +54,23 @@ class SettingsDialog(ctk.CTkToplevel):
     def _build_ui(self) -> None:
         container = ctk.CTkFrame(self)
         container.pack(fill="both", expand=True, padx=12, pady=12)
+        container.grid_columnconfigure(1, weight=1)
+        container.grid_rowconfigure(0, weight=1)
 
-        left = ctk.CTkFrame(container, width=200)
-        left.pack(side="left", fill="y", padx=(0, 8), pady=8)
+        left = ctk.CTkFrame(container, width=190)
+        left.grid(row=0, column=0, sticky="ns", padx=(0, 10), pady=8)
 
         right = ctk.CTkFrame(container)
-        right.pack(side="left", fill="both", expand=True, padx=(0, 8), pady=8)
+        right.grid(row=0, column=1, sticky="nsew", padx=(0, 8), pady=8)
 
-        self._category_list = tk.Listbox(left, height=8, exportselection=False)
+        self._category_list = tk.Listbox(
+            left,
+            height=6,
+            exportselection=False,
+            activestyle="none",
+            highlightthickness=1,
+            borderwidth=0,
+        )
         self._category_list.pack(fill="both", expand=True, padx=8, pady=8)
         categories = ["Загальні", "Оформлення", "Кольори", "Шрифти"]
         for item in categories:
@@ -67,59 +88,88 @@ class SettingsDialog(ctk.CTkToplevel):
 
         footer = ctk.CTkFrame(self)
         footer.pack(fill="x", padx=12, pady=(0, 12))
+        footer.grid_columnconfigure(0, weight=1)
+        footer.grid_columnconfigure(1, weight=0)
 
         reset_btn = ctk.CTkButton(footer, text="Скинути все", command=self._reset_all)
-        reset_btn.pack(side="left", padx=6, pady=6)
+        reset_btn.grid(row=0, column=0, sticky="w", padx=6, pady=6)
 
         button_box = ctk.CTkFrame(footer, fg_color="transparent")
-        button_box.pack(side="right", padx=6, pady=6)
+        button_box.grid(row=0, column=1, sticky="e", padx=6, pady=6)
 
-        ok_btn = ctk.CTkButton(button_box, text="OK", width=90, command=self._on_ok)
-        ok_btn.pack(side="left", padx=4)
-        cancel_btn = ctk.CTkButton(button_box, text="Cancel", width=90, command=self._on_cancel)
+        button_width = 100
+        self._ok_btn = ctk.CTkButton(button_box, text="OK", width=button_width, command=self._on_ok)
+        self._ok_btn.pack(side="left", padx=4)
+        cancel_btn = ctk.CTkButton(button_box, text="Cancel", width=button_width, command=self._on_cancel)
         cancel_btn.pack(side="left", padx=4)
-        apply_btn = ctk.CTkButton(button_box, text="Apply", width=90, command=self._on_apply_click)
-        apply_btn.pack(side="left", padx=4)
+        self._apply_btn = ctk.CTkButton(button_box, text="Apply", width=button_width, command=self._on_apply_click)
+        self._apply_btn.pack(side="left", padx=4)
 
     def _build_general_panel(self, parent: ctk.CTkFrame) -> None:
         panel = ctk.CTkFrame(parent)
         panel.pack(fill="both", expand=True)
         self._panels["Загальні"] = panel
 
+        info_frame = ctk.CTkFrame(panel)
+        info_frame.pack(fill="x", padx=12, pady=12)
+        info_frame.grid_columnconfigure(0, weight=1)
+
         data_dir = str(get_data_dir())
-        ctk.CTkLabel(panel, text="Каталог даних:").pack(anchor="w", padx=12, pady=(12, 4))
-        data_entry = ctk.CTkEntry(panel)
+        ctk.CTkLabel(info_frame, text="Каталог даних:").grid(row=0, column=0, sticky="w", padx=12, pady=(12, 4))
+        data_entry = ctk.CTkEntry(info_frame)
         data_entry.insert(0, data_dir)
         data_entry.configure(state="readonly")
-        data_entry.pack(fill="x", padx=12, pady=(0, 8))
+        data_entry.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
 
-        ctk.CTkLabel(panel, text="Папка експорту (за замовчуванням):").pack(anchor="w", padx=12, pady=(12, 4))
+        ctk.CTkLabel(info_frame, text="Папка експорту (за замовчуванням):").grid(
+            row=2,
+            column=0,
+            sticky="w",
+            padx=12,
+            pady=(0, 4),
+        )
         self._export_folder_var = tk.StringVar(value=self._draft_settings.get("export_folder", ""))
-        export_entry = ctk.CTkEntry(panel, textvariable=self._export_folder_var)
-        export_entry.pack(fill="x", padx=12, pady=(0, 4))
+        export_entry = ctk.CTkEntry(info_frame, textvariable=self._export_folder_var)
+        export_entry.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 4))
 
-        browse_btn = ctk.CTkButton(panel, text="Обрати...", command=self._choose_export_folder)
-        browse_btn.pack(anchor="e", padx=12, pady=(0, 8))
+        browse_btn = ctk.CTkButton(info_frame, text="Обрати...", command=self._choose_export_folder)
+        browse_btn.grid(row=4, column=0, sticky="e", padx=12, pady=(0, 12))
 
     def _build_appearance_panel(self, parent: ctk.CTkFrame) -> None:
         panel = ctk.CTkFrame(parent)
         panel.pack(fill="both", expand=True)
         self._panels["Оформлення"] = panel
 
-        ctk.CTkLabel(panel, text="Режим оформлення:").pack(anchor="w", padx=12, pady=(12, 4))
-        self._appearance_var = tk.StringVar(value=self._draft_settings.get("appearance_mode", "Dark"))
-        appearance_menu = ctk.CTkOptionMenu(panel, values=["System", "Light", "Dark"], variable=self._appearance_var)
-        appearance_menu.pack(anchor="w", padx=12, pady=(0, 12))
+        appearance_frame = ctk.CTkFrame(panel)
+        appearance_frame.pack(fill="x", padx=12, pady=12)
+        appearance_frame.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(panel, text="Тема профілю:").pack(anchor="w", padx=12, pady=(8, 4))
+        ctk.CTkLabel(appearance_frame, text="Режим оформлення:").grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=12,
+            pady=(12, 4),
+        )
+        self._appearance_var = tk.StringVar(value=self._draft_settings.get("appearance_mode", "Dark"))
+        appearance_menu = ctk.CTkOptionMenu(appearance_frame, values=["System", "Light", "Dark"], variable=self._appearance_var)
+        appearance_menu.grid(row=1, column=0, sticky="w", padx=12, pady=(0, 12))
+
+        ctk.CTkLabel(appearance_frame, text="Тема профілю:").grid(
+            row=2,
+            column=0,
+            sticky="w",
+            padx=12,
+            pady=(0, 4),
+        )
         self._profile_var = tk.StringVar(value=self._draft_settings.get("theme_profile", "dark"))
         profile_menu = ctk.CTkOptionMenu(
-            panel,
+            appearance_frame,
             values=["dark", "light"],
             variable=self._profile_var,
             command=self._on_profile_change,
         )
-        profile_menu.pack(anchor="w", padx=12, pady=(0, 8))
+        profile_menu.grid(row=3, column=0, sticky="w", padx=12, pady=(0, 12))
 
     def _build_colors_panel(self, parent: ctk.CTkFrame) -> None:
         panel = ctk.CTkFrame(parent)
@@ -127,6 +177,36 @@ class SettingsDialog(ctk.CTkToplevel):
         self._panels["Кольори"] = panel
 
         self._color_vars: Dict[str, tk.StringVar] = {}
+        panel.grid_columnconfigure(0, weight=1)
+        panel.grid_rowconfigure(1, weight=1)
+
+        actions_frame = ctk.CTkFrame(panel)
+        actions_frame.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
+        actions_frame.grid_columnconfigure(0, weight=1)
+
+        copy_dark_btn = ctk.CTkButton(
+            actions_frame,
+            text="Скопіювати dark → light",
+            command=lambda: self._copy_profile_colors("dark", "light"),
+        )
+        copy_dark_btn.grid(row=0, column=0, sticky="w", padx=8, pady=8)
+        copy_light_btn = ctk.CTkButton(
+            actions_frame,
+            text="Скопіювати light → dark",
+            command=lambda: self._copy_profile_colors("light", "dark"),
+        )
+        copy_light_btn.grid(row=0, column=1, sticky="w", padx=8, pady=8)
+        reset_profile_btn = ctk.CTkButton(
+            actions_frame,
+            text="Скинути поточний профіль",
+            command=self._reset_current_profile,
+        )
+        reset_profile_btn.grid(row=0, column=2, sticky="e", padx=8, pady=8)
+
+        colors_frame = ctk.CTkFrame(panel)
+        colors_frame.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
+        colors_frame.grid_columnconfigure(1, weight=1)
+
         labels = [
             ("background", "Background"),
             ("surface", "Surface / Panel"),
@@ -136,12 +216,55 @@ class SettingsDialog(ctk.CTkToplevel):
             ("danger", "Danger"),
             ("border", "Border"),
         ]
-        for key, label in labels:
-            ctk.CTkLabel(panel, text=f"{label}:").pack(anchor="w", padx=12, pady=(8, 2))
+        for row_index, (key, label) in enumerate(labels):
+            base_row = row_index * 2
+            ctk.CTkLabel(colors_frame, text=f"{label}:").grid(
+                row=base_row,
+                column=0,
+                sticky="w",
+                padx=(12, 6),
+                pady=(10, 2),
+            )
             var = tk.StringVar()
-            entry = ctk.CTkEntry(panel, textvariable=var)
-            entry.pack(fill="x", padx=12, pady=(0, 4))
+            entry = ctk.CTkEntry(colors_frame, textvariable=var)
+            entry.grid(row=base_row, column=1, sticky="ew", padx=6, pady=(10, 2))
+            entry.bind("<KeyRelease>", lambda _event, color_key=key: self._validate_color_entry(color_key))
+            entry.bind("<FocusOut>", lambda _event, color_key=key: self._validate_color_entry(color_key))
+            self._entry_border_colors[key] = entry.cget("border_color")
+
+            swatch = ctk.CTkFrame(colors_frame, width=28, height=24, corner_radius=4)
+            swatch.grid(row=base_row, column=2, sticky="w", padx=6, pady=(10, 2))
+            swatch.grid_propagate(False)
+
+            pick_btn = ctk.CTkButton(
+                colors_frame,
+                text="...",
+                width=40,
+                command=lambda color_key=key: self._pick_color(color_key),
+            )
+            pick_btn.grid(row=base_row, column=3, sticky="w", padx=6, pady=(10, 2))
+            reset_btn = ctk.CTkButton(
+                colors_frame,
+                text="Reset",
+                width=60,
+                command=lambda color_key=key: self._reset_color(color_key),
+            )
+            reset_btn.grid(row=base_row, column=4, sticky="w", padx=6, pady=(10, 2))
+            copy_btn = ctk.CTkButton(
+                colors_frame,
+                text="Copy",
+                width=60,
+                command=lambda color_key=key: self._copy_color(color_key),
+            )
+            copy_btn.grid(row=base_row, column=5, sticky="w", padx=6, pady=(10, 2))
+
+            error_label = ctk.CTkLabel(colors_frame, text="", text_color="red")
+            error_label.grid(row=base_row + 1, column=1, columnspan=5, sticky="w", padx=6, pady=(0, 4))
+
             self._color_vars[key] = var
+            self._color_entries[key] = entry
+            self._color_swatches[key] = swatch
+            self._color_error_labels[key] = error_label
 
     def _build_fonts_panel(self, parent: ctk.CTkFrame) -> None:
         panel = ctk.CTkFrame(parent)
@@ -190,13 +313,15 @@ class SettingsDialog(ctk.CTkToplevel):
         theme = themes.setdefault(profile, {})
         colors = theme.setdefault("colors", {})
         fonts = theme.setdefault("fonts", {})
+        default_colors = self._default_settings["themes"][profile]["colors"]
 
         for key, var in self._color_vars.items():
-            var.set(colors.get(key, ""))
+            var.set(colors.get(key, default_colors.get(key, "")))
 
         self._font_family_var.set(str(fonts.get("family", "")))
         self._font_base_var.set(str(fonts.get("base_size", "")))
         self._font_heading_var.set(str(fonts.get("heading_size", "")))
+        self._validate_all_colors()
 
     def _collect_profile_fields(self) -> None:
         profile = self._profile_var.get() or "dark"
@@ -218,14 +343,22 @@ class SettingsDialog(ctk.CTkToplevel):
         self._draft_settings["export_folder"] = self._export_folder_var.get().strip()
 
     def _apply_internal(self) -> None:
-        self._collect_profile_fields()
-        self._collect_common_fields()
-        if self._on_apply:
-            self._on_apply(deepcopy(self._draft_settings))
+        if self._color_errors:
+            return False
+        try:
+            self._collect_profile_fields()
+            self._collect_common_fields()
+            if self._on_apply:
+                self._on_apply(deepcopy(self._draft_settings))
+        except Exception:
+            logger.exception("Не вдалося застосувати налаштування")
+            messagebox.showerror("Помилка", "Не вдалося застосувати налаштування.")
+            return False
+        return True
 
     def _on_ok(self) -> None:
-        self._apply_internal()
-        self.destroy()
+        if self._apply_internal():
+            self.destroy()
 
     def _on_cancel(self) -> None:
         self.destroy()
@@ -239,8 +372,90 @@ class SettingsDialog(ctk.CTkToplevel):
         self._profile_var.set(self._draft_settings.get("theme_profile", "dark"))
         self._export_folder_var.set(self._draft_settings.get("export_folder", ""))
         self._refresh_profile_fields()
+        self._update_action_buttons_state()
 
     def _choose_export_folder(self) -> None:
         path = filedialog.askdirectory(parent=self)
         if path:
             self._export_folder_var.set(path)
+
+    def _on_cancel_event(self, _event: tk.Event) -> None:
+        self._on_cancel()
+
+    def _on_apply_shortcut(self, _event: tk.Event) -> str:
+        if not self._color_errors:
+            self._on_apply_click()
+        return "break"
+
+    def _on_ok_shortcut(self, _event: tk.Event) -> str:
+        if not self._color_errors:
+            self._on_ok()
+        return "break"
+
+    def _reset_color(self, key: str) -> None:
+        profile = self._profile_var.get() or "dark"
+        default_color = self._default_settings["themes"][profile]["colors"].get(key, "")
+        self._color_vars[key].set(default_color)
+        self._validate_color_entry(key)
+
+    def _copy_color(self, key: str) -> None:
+        value = self._color_vars[key].get().strip()
+        normalized = normalize_hex_color(value)
+        if not normalized:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(normalized)
+
+    def _pick_color(self, key: str) -> None:
+        result = colorchooser.askcolor(parent=self)
+        if not result or not result[1]:
+            return
+        normalized = normalize_hex_color(result[1])
+        if not normalized:
+            return
+        self._color_vars[key].set(normalized)
+        self._validate_color_entry(key)
+
+    def _copy_profile_colors(self, source: str, target: str) -> None:
+        themes = self._draft_settings.setdefault("themes", {})
+        source_colors = themes.get(source, {}).get("colors")
+        if not isinstance(source_colors, dict):
+            source_colors = self._default_settings["themes"][source]["colors"]
+        themes.setdefault(target, {})["colors"] = deepcopy(source_colors)
+        if (self._profile_var.get() or "dark") == target:
+            self._refresh_profile_fields()
+
+    def _reset_current_profile(self) -> None:
+        profile = self._profile_var.get() or "dark"
+        themes = self._draft_settings.setdefault("themes", {})
+        theme = themes.setdefault(profile, {})
+        theme["colors"] = deepcopy(self._default_settings["themes"][profile]["colors"])
+        self._refresh_profile_fields()
+
+    def _validate_color_entry(self, key: str) -> None:
+        value = self._color_vars[key].get().strip()
+        normalized = normalize_hex_color(value)
+        entry = self._color_entries[key]
+        error_label = self._color_error_labels[key]
+        if normalized:
+            if value != normalized:
+                self._color_vars[key].set(normalized)
+            self._color_errors.discard(key)
+            entry.configure(border_color=self._entry_border_colors[key])
+            error_label.configure(text="")
+            self._color_swatches[key].configure(fg_color=normalized)
+        else:
+            self._color_errors.add(key)
+            entry.configure(border_color="red")
+            error_label.configure(text="Очікується #RRGGBB")
+        self._update_action_buttons_state()
+
+    def _validate_all_colors(self) -> None:
+        self._color_errors.clear()
+        for key in self._color_vars:
+            self._validate_color_entry(key)
+
+    def _update_action_buttons_state(self) -> None:
+        state = "normal" if not self._color_errors else "disabled"
+        self._ok_btn.configure(state=state)
+        self._apply_btn.configure(state=state)

@@ -13,7 +13,26 @@ from app_paths import get_config_path, get_default_export_dir
 
 logger = logging.getLogger(__name__)
 
-_HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+def normalize_hex_color(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+
+    raw = value.strip()
+    if not raw:
+        return None
+
+    if raw.startswith("#"):
+        raw = raw[1:]
+
+    if len(raw) == 3:
+        raw = "".join(ch * 2 for ch in raw)
+    elif len(raw) != 6:
+        return None
+
+    if not re.fullmatch(r"[0-9a-fA-F]{6}", raw):
+        return None
+
+    return f"#{raw.upper()}"
 
 
 def default_settings() -> Dict[str, Any]:
@@ -72,8 +91,9 @@ def _backup_bad_file(path: Path) -> None:
 
 
 def _normalize_color(value: Any, fallback: str) -> str:
-    if isinstance(value, str) and _HEX_COLOR_RE.match(value.strip()):
-        return value.strip()
+    normalized = normalize_hex_color(value)
+    if normalized:
+        return normalized
     return fallback
 
 
