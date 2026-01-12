@@ -26,7 +26,13 @@ class SettingsDialog(ctk.CTkToplevel):
     ) -> None:
         super().__init__(parent)
         self.title("Налаштування")
-        self.geometry("820x520")
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        w = min(900, int(screen_w * 0.90))
+        h = min(700, int(screen_h * 0.85))
+        x = (screen_w - w) // 2
+        y = (screen_h - h) // 2
+        self.geometry(f"{w}x{h}+{x}+{y}")
         self.minsize(720, 420)
         self.resizable(True, True)
         self.transient(parent)
@@ -41,6 +47,8 @@ class SettingsDialog(ctk.CTkToplevel):
         self._color_swatches: Dict[str, ctk.CTkFrame] = {}
         self._color_error_labels: Dict[str, ctk.CTkLabel] = {}
         self._entry_border_colors: Dict[str, str] = {}
+        self._colors_scroll: Optional[ctk.CTkScrollableFrame] = None
+        self._fonts_scroll: Optional[ctk.CTkScrollableFrame] = None
 
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
         self.bind("<Escape>", self._on_cancel_event)
@@ -177,35 +185,35 @@ class SettingsDialog(ctk.CTkToplevel):
         self._panels["Кольори"] = panel
 
         self._color_vars: Dict[str, tk.StringVar] = {}
-        panel.grid_columnconfigure(0, weight=1)
-        panel.grid_rowconfigure(1, weight=1)
 
-        actions_frame = ctk.CTkFrame(panel)
-        actions_frame.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
-        actions_frame.grid_columnconfigure(0, weight=1)
+        top_actions = ctk.CTkFrame(panel)
+        top_actions.pack(fill="x", padx=12, pady=(12, 6))
+        top_actions.grid_columnconfigure(0, weight=1)
 
         copy_dark_btn = ctk.CTkButton(
-            actions_frame,
+            top_actions,
             text="Скопіювати dark → light",
             command=lambda: self._copy_profile_colors("dark", "light"),
         )
         copy_dark_btn.grid(row=0, column=0, sticky="w", padx=8, pady=8)
         copy_light_btn = ctk.CTkButton(
-            actions_frame,
+            top_actions,
             text="Скопіювати light → dark",
             command=lambda: self._copy_profile_colors("light", "dark"),
         )
         copy_light_btn.grid(row=0, column=1, sticky="w", padx=8, pady=8)
         reset_profile_btn = ctk.CTkButton(
-            actions_frame,
+            top_actions,
             text="Скинути поточний профіль",
             command=self._reset_current_profile,
         )
         reset_profile_btn.grid(row=0, column=2, sticky="e", padx=8, pady=8)
 
-        colors_frame = ctk.CTkFrame(panel)
-        colors_frame.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
-        colors_frame.grid_columnconfigure(1, weight=1)
+        scroll = ctk.CTkScrollableFrame(panel)
+        scroll.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        scroll.grid_columnconfigure(1, weight=1)
+        self._colors_scroll = scroll
+        self._bind_scrollwheel(scroll)
 
         sections = [
             (
@@ -252,11 +260,11 @@ class SettingsDialog(ctk.CTkToplevel):
         ]
         row_index = 0
         for title, labels in sections:
-            section_label = ctk.CTkLabel(colors_frame, text=title)
+            section_label = ctk.CTkLabel(scroll, text=title)
             section_label.grid(row=row_index, column=0, columnspan=6, sticky="w", padx=12, pady=(12, 2))
             row_index += 1
             for key, label in labels:
-                ctk.CTkLabel(colors_frame, text=f"{label}:").grid(
+                ctk.CTkLabel(scroll, text=f"{label}:").grid(
                     row=row_index,
                     column=0,
                     sticky="w",
@@ -264,40 +272,40 @@ class SettingsDialog(ctk.CTkToplevel):
                     pady=(6, 2),
                 )
                 var = tk.StringVar()
-                entry = ctk.CTkEntry(colors_frame, textvariable=var)
+                entry = ctk.CTkEntry(scroll, textvariable=var)
                 entry.grid(row=row_index, column=1, sticky="ew", padx=6, pady=(6, 2))
                 entry.bind("<KeyRelease>", lambda _event, color_key=key: self._validate_color_entry(color_key))
                 entry.bind("<FocusOut>", lambda _event, color_key=key: self._validate_color_entry(color_key))
                 self._entry_border_colors[key] = entry.cget("border_color")
 
-                swatch = ctk.CTkFrame(colors_frame, width=28, height=24, corner_radius=4)
+                swatch = ctk.CTkFrame(scroll, width=28, height=24, corner_radius=4)
                 swatch.grid(row=row_index, column=2, sticky="w", padx=6, pady=(6, 2))
                 swatch.grid_propagate(False)
                 swatch.bind("<Button-1>", lambda _event, color_key=key: self._pick_color(color_key))
 
                 pick_btn = ctk.CTkButton(
-                    colors_frame,
+                    scroll,
                     text="...",
                     width=40,
                     command=lambda color_key=key: self._pick_color(color_key),
                 )
                 pick_btn.grid(row=row_index, column=3, sticky="w", padx=6, pady=(6, 2))
                 reset_btn = ctk.CTkButton(
-                    colors_frame,
+                    scroll,
                     text="Reset",
                     width=60,
                     command=lambda color_key=key: self._reset_color(color_key),
                 )
                 reset_btn.grid(row=row_index, column=4, sticky="w", padx=6, pady=(6, 2))
                 copy_btn = ctk.CTkButton(
-                    colors_frame,
+                    scroll,
                     text="Copy",
                     width=60,
                     command=lambda color_key=key: self._copy_color(color_key),
                 )
                 copy_btn.grid(row=row_index, column=5, sticky="w", padx=6, pady=(6, 2))
 
-                error_label = ctk.CTkLabel(colors_frame, text="", text_color="red")
+                error_label = ctk.CTkLabel(scroll, text="", text_color="red")
                 error_label.grid(row=row_index + 1, column=1, columnspan=5, sticky="w", padx=6, pady=(0, 4))
 
                 self._color_vars[key] = var
@@ -311,20 +319,25 @@ class SettingsDialog(ctk.CTkToplevel):
         panel.pack(fill="both", expand=True)
         self._panels["Шрифти"] = panel
 
-        ctk.CTkLabel(panel, text="Family:").pack(anchor="w", padx=12, pady=(12, 4))
+        scroll = ctk.CTkScrollableFrame(panel)
+        scroll.pack(fill="both", expand=True, padx=12, pady=12)
+        self._fonts_scroll = scroll
+        self._bind_scrollwheel(scroll)
+
+        ctk.CTkLabel(scroll, text="Family:").pack(anchor="w", padx=12, pady=(12, 4))
         families = sorted(set(tkfont.families(self)))
         self._font_family_var = tk.StringVar()
-        family_combo = ttk.Combobox(panel, values=families, textvariable=self._font_family_var)
+        family_combo = ttk.Combobox(scroll, values=families, textvariable=self._font_family_var)
         family_combo.pack(fill="x", padx=12, pady=(0, 8))
 
-        ctk.CTkLabel(panel, text="Base size:").pack(anchor="w", padx=12, pady=(8, 4))
+        ctk.CTkLabel(scroll, text="Base size:").pack(anchor="w", padx=12, pady=(8, 4))
         self._font_base_var = tk.StringVar()
-        base_entry = ctk.CTkEntry(panel, textvariable=self._font_base_var)
+        base_entry = ctk.CTkEntry(scroll, textvariable=self._font_base_var)
         base_entry.pack(fill="x", padx=12, pady=(0, 8))
 
-        ctk.CTkLabel(panel, text="Heading size:").pack(anchor="w", padx=12, pady=(8, 4))
+        ctk.CTkLabel(scroll, text="Heading size:").pack(anchor="w", padx=12, pady=(8, 4))
         self._font_heading_var = tk.StringVar()
-        heading_entry = ctk.CTkEntry(panel, textvariable=self._font_heading_var)
+        heading_entry = ctk.CTkEntry(scroll, textvariable=self._font_heading_var)
         heading_entry.pack(fill="x", padx=12, pady=(0, 8))
 
     def _select_category(self, name: str) -> None:
@@ -335,6 +348,42 @@ class SettingsDialog(ctk.CTkToplevel):
                 panel.pack_forget()
         if name in {"Кольори", "Шрифти"}:
             self._refresh_profile_fields()
+        if name == "Кольори" and self._colors_scroll:
+            try:
+                self._colors_scroll._parent_canvas.yview_moveto(0)
+            except Exception:
+                pass
+        if name == "Шрифти" and self._fonts_scroll:
+            try:
+                self._fonts_scroll._parent_canvas.yview_moveto(0)
+            except Exception:
+                pass
+
+    def _bind_scrollwheel(self, scroll: ctk.CTkScrollableFrame) -> None:
+        try:
+            canvas = scroll._parent_canvas
+        except Exception:
+            return
+
+        def _on_mousewheel(event: tk.Event) -> str:
+            if getattr(event, "delta", 0):
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            return "break"
+
+        def _on_button4(_event: tk.Event) -> str:
+            canvas.yview_scroll(-1, "units")
+            return "break"
+
+        def _on_button5(_event: tk.Event) -> str:
+            canvas.yview_scroll(1, "units")
+            return "break"
+
+        try:
+            canvas.bind("<MouseWheel>", _on_mousewheel)
+            canvas.bind("<Button-4>", _on_button4)
+            canvas.bind("<Button-5>", _on_button5)
+        except Exception:
+            pass
 
     def _on_category_select(self, _event: tk.Event) -> None:
         selection = self._category_list.curselection()
