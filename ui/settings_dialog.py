@@ -207,64 +207,104 @@ class SettingsDialog(ctk.CTkToplevel):
         colors_frame.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
         colors_frame.grid_columnconfigure(1, weight=1)
 
-        labels = [
-            ("background", "Background"),
-            ("surface", "Surface / Panel"),
-            ("widget_fg", "Widget FG"),
-            ("text", "Text"),
-            ("accent", "Accent"),
-            ("danger", "Danger"),
-            ("border", "Border"),
+        sections = [
+            (
+                "Основні",
+                [
+                    ("background", "Background"),
+                    ("surface", "Surface / Panel"),
+                    ("widget_fg", "Widget FG"),
+                    ("border", "Border"),
+                    ("text", "Text"),
+                    ("accent", "Accent"),
+                    ("danger", "Danger"),
+                ],
+            ),
+            (
+                "Прокрутка",
+                [
+                    ("scrollbar_track", "Scrollbar track"),
+                    ("scrollbar_thumb", "Scrollbar thumb"),
+                    ("scrollbar_thumb_hover", "Scrollbar thumb hover"),
+                ],
+            ),
+            (
+                "Заголовки / шапки панелей",
+                [
+                    ("header_bg", "Header BG"),
+                    ("header_text", "Header text"),
+                    ("header_border", "Header border"),
+                ],
+            ),
+            (
+                "Виділення",
+                [
+                    ("selection_bg", "Selection BG"),
+                    ("selection_text", "Selection text"),
+                ],
+            ),
+            (
+                "Текст / Ввід",
+                [
+                    ("caret", "Caret"),
+                ],
+            ),
         ]
-        for row_index, (key, label) in enumerate(labels):
-            base_row = row_index * 2
-            ctk.CTkLabel(colors_frame, text=f"{label}:").grid(
-                row=base_row,
-                column=0,
-                sticky="w",
-                padx=(12, 6),
-                pady=(10, 2),
-            )
-            var = tk.StringVar()
-            entry = ctk.CTkEntry(colors_frame, textvariable=var)
-            entry.grid(row=base_row, column=1, sticky="ew", padx=6, pady=(10, 2))
-            entry.bind("<KeyRelease>", lambda _event, color_key=key: self._validate_color_entry(color_key))
-            entry.bind("<FocusOut>", lambda _event, color_key=key: self._validate_color_entry(color_key))
-            self._entry_border_colors[key] = entry.cget("border_color")
+        row_index = 0
+        for title, labels in sections:
+            section_label = ctk.CTkLabel(colors_frame, text=title)
+            section_label.grid(row=row_index, column=0, columnspan=6, sticky="w", padx=12, pady=(12, 2))
+            row_index += 1
+            for key, label in labels:
+                ctk.CTkLabel(colors_frame, text=f"{label}:").grid(
+                    row=row_index,
+                    column=0,
+                    sticky="w",
+                    padx=(12, 6),
+                    pady=(6, 2),
+                )
+                var = tk.StringVar()
+                entry = ctk.CTkEntry(colors_frame, textvariable=var)
+                entry.grid(row=row_index, column=1, sticky="ew", padx=6, pady=(6, 2))
+                entry.bind("<KeyRelease>", lambda _event, color_key=key: self._validate_color_entry(color_key))
+                entry.bind("<FocusOut>", lambda _event, color_key=key: self._validate_color_entry(color_key))
+                self._entry_border_colors[key] = entry.cget("border_color")
 
-            swatch = ctk.CTkFrame(colors_frame, width=28, height=24, corner_radius=4)
-            swatch.grid(row=base_row, column=2, sticky="w", padx=6, pady=(10, 2))
-            swatch.grid_propagate(False)
+                swatch = ctk.CTkFrame(colors_frame, width=28, height=24, corner_radius=4)
+                swatch.grid(row=row_index, column=2, sticky="w", padx=6, pady=(6, 2))
+                swatch.grid_propagate(False)
+                swatch.bind("<Button-1>", lambda _event, color_key=key: self._pick_color(color_key))
 
-            pick_btn = ctk.CTkButton(
-                colors_frame,
-                text="...",
-                width=40,
-                command=lambda color_key=key: self._pick_color(color_key),
-            )
-            pick_btn.grid(row=base_row, column=3, sticky="w", padx=6, pady=(10, 2))
-            reset_btn = ctk.CTkButton(
-                colors_frame,
-                text="Reset",
-                width=60,
-                command=lambda color_key=key: self._reset_color(color_key),
-            )
-            reset_btn.grid(row=base_row, column=4, sticky="w", padx=6, pady=(10, 2))
-            copy_btn = ctk.CTkButton(
-                colors_frame,
-                text="Copy",
-                width=60,
-                command=lambda color_key=key: self._copy_color(color_key),
-            )
-            copy_btn.grid(row=base_row, column=5, sticky="w", padx=6, pady=(10, 2))
+                pick_btn = ctk.CTkButton(
+                    colors_frame,
+                    text="...",
+                    width=40,
+                    command=lambda color_key=key: self._pick_color(color_key),
+                )
+                pick_btn.grid(row=row_index, column=3, sticky="w", padx=6, pady=(6, 2))
+                reset_btn = ctk.CTkButton(
+                    colors_frame,
+                    text="Reset",
+                    width=60,
+                    command=lambda color_key=key: self._reset_color(color_key),
+                )
+                reset_btn.grid(row=row_index, column=4, sticky="w", padx=6, pady=(6, 2))
+                copy_btn = ctk.CTkButton(
+                    colors_frame,
+                    text="Copy",
+                    width=60,
+                    command=lambda color_key=key: self._copy_color(color_key),
+                )
+                copy_btn.grid(row=row_index, column=5, sticky="w", padx=6, pady=(6, 2))
 
-            error_label = ctk.CTkLabel(colors_frame, text="", text_color="red")
-            error_label.grid(row=base_row + 1, column=1, columnspan=5, sticky="w", padx=6, pady=(0, 4))
+                error_label = ctk.CTkLabel(colors_frame, text="", text_color="red")
+                error_label.grid(row=row_index + 1, column=1, columnspan=5, sticky="w", padx=6, pady=(0, 4))
 
-            self._color_vars[key] = var
-            self._color_entries[key] = entry
-            self._color_swatches[key] = swatch
-            self._color_error_labels[key] = error_label
+                self._color_vars[key] = var
+                self._color_entries[key] = entry
+                self._color_swatches[key] = swatch
+                self._color_error_labels[key] = error_label
+                row_index += 2
 
     def _build_fonts_panel(self, parent: ctk.CTkFrame) -> None:
         panel = ctk.CTkFrame(parent)
@@ -322,6 +362,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self._font_base_var.set(str(fonts.get("base_size", "")))
         self._font_heading_var.set(str(fonts.get("heading_size", "")))
         self._validate_all_colors()
+        self._apply_listbox_theme()
 
     def _collect_profile_fields(self) -> None:
         profile = self._profile_var.get() or "dark"
@@ -407,7 +448,8 @@ class SettingsDialog(ctk.CTkToplevel):
         self.clipboard_append(normalized)
 
     def _pick_color(self, key: str) -> None:
-        result = colorchooser.askcolor(parent=self)
+        current = normalize_hex_color(self._color_vars[key].get().strip())
+        result = colorchooser.askcolor(parent=self, initialcolor=current or None)
         if not result or not result[1]:
             return
         normalized = normalize_hex_color(result[1])
@@ -459,3 +501,28 @@ class SettingsDialog(ctk.CTkToplevel):
         state = "normal" if not self._color_errors else "disabled"
         self._ok_btn.configure(state=state)
         self._apply_btn.configure(state=state)
+
+    def _apply_listbox_theme(self) -> None:
+        profile = self._profile_var.get() or "dark"
+        colors = self._draft_settings.get("themes", {}).get(profile, {}).get("colors", {})
+        default_colors = self._default_settings["themes"][profile]["colors"]
+        if not isinstance(colors, dict):
+            colors = {}
+        def _color(key: str, fallback_key: str | None = None) -> str:
+            return (
+                normalize_hex_color(colors.get(key))
+                or normalize_hex_color(default_colors.get(key))
+                or (normalize_hex_color(default_colors.get(fallback_key)) if fallback_key else "")
+                or ""
+            )
+        try:
+            self._category_list.configure(
+                background=_color("widget_fg"),
+                foreground=_color("text"),
+                selectbackground=_color("selection_bg"),
+                selectforeground=_color("selection_text"),
+                highlightbackground=_color("border"),
+                highlightcolor=_color("border"),
+            )
+        except Exception:
+            logger.exception("Не вдалося застосувати тему до списку категорій в SettingsDialog")

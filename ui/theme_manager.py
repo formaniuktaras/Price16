@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
+import logging
 
 import tkinter as tk
 import tkinter.font as tkfont
 
 import customtkinter as ctk
+
+logger = logging.getLogger(__name__)
 
 
 class ThemeManager:
@@ -60,7 +63,7 @@ class ThemeManager:
             try:
                 widget.configure(**kwargs)
             except Exception:
-                return
+                logger.exception("Не вдалося застосувати тему до %s (%s)", widget, role)
 
         if role == "background":
             safe_configure(fg_color=colors.get("background"))
