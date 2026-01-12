@@ -129,23 +129,32 @@ def create_inline_entry(parent, text: str, theme_colors: Optional[Dict[str, str]
         bg = theme_colors.get("widget_fg", "#2b2b2b")
         fg = theme_colors.get("text", "#f2f2f2")
         border = theme_colors.get("border", "#565b5e")
+        selection_bg = theme_colors.get("selection_bg", "#1f6aa5")
+        selection_fg = theme_colors.get("selection_text", fg)
+        caret = theme_colors.get("caret", fg)
     elif mode == "dark":
         bg = "#2b2b2b"
         fg = "#f2f2f2"
         border = "#565b5e"
+        selection_bg = "#1f6aa5"
+        selection_fg = "#ffffff"
+        caret = fg
     else:
         bg = "#ffffff"
         fg = "#1f1f1f"
         border = "#a5a5a5"
+        selection_bg = "#1f6aa5"
+        selection_fg = "#ffffff"
+        caret = fg
     entry.configure(
         background=bg,
         foreground=fg,
-        insertbackground=fg,
-        selectbackground="#1f6aa5",
-        selectforeground=fg,
+        insertbackground=caret,
+        selectbackground=selection_bg,
+        selectforeground=selection_fg,
         highlightthickness=1,
         highlightbackground=border,
-        highlightcolor="#1f6aa5",
+        highlightcolor=selection_bg,
         borderwidth=0,
         relief="flat",
     )
@@ -535,14 +544,32 @@ class SpecsWindow(ctk.CTkToplevel):
     def _init_tree_style(self):
         style = ttk.Style(self)
         style_name = "Specs.Treeview"
+        theme_colors = {}
+        master = getattr(self, "master", None)
+        if master is not None:
+            theme_manager = getattr(master, "theme_manager", None)
+            if theme_manager is not None:
+                theme_colors = getattr(theme_manager, "colors", {}) or {}
         mode = (ctk.get_appearance_mode() or "light").lower()
-        if mode == "dark":
+        if theme_colors:
+            bg = theme_colors.get("widget_fg", "#1f1f1f")
+            alt_bg = theme_colors.get("surface", bg)
+            fg = theme_colors.get("text", "#f2f2f2")
+            border = theme_colors.get("border", "#565b5e")
+            heading_bg = theme_colors.get("header_bg", bg)
+            heading_fg = theme_colors.get("header_text", fg)
+            heading_border = theme_colors.get("header_border", border)
+            hover_bg = theme_colors.get("header_border", border)
+            select_bg = theme_colors.get("selection_bg", "#1f6aa5")
+            select_fg = theme_colors.get("selection_text", "#ffffff")
+        elif mode == "dark":
             bg = "#1f1f1f"
             alt_bg = "#242424"
             fg = "#f2f2f2"
             border = "#565b5e"
             heading_bg = "#232323"
             heading_fg = fg
+            heading_border = border
             hover_bg = "#303030"
             select_bg = "#1f6aa5"
             select_fg = "#ffffff"
@@ -553,6 +580,7 @@ class SpecsWindow(ctk.CTkToplevel):
             border = "#a5a5a5"
             heading_bg = "#f1f1f1"
             heading_fg = fg
+            heading_border = border
             hover_bg = "#e2e2e2"
             select_bg = "#1f6aa5"
             select_fg = "#ffffff"
@@ -560,7 +588,19 @@ class SpecsWindow(ctk.CTkToplevel):
             style.theme_use("clam")
         except tk.TclError:
             pass
-        style.configure(
+        def safe_style_configure(style_name: str, **kwargs: object) -> None:
+            try:
+                style.configure(style_name, **kwargs)
+            except Exception:
+                logger.exception("Не вдалося налаштувати ttk стиль %s", style_name)
+
+        def safe_style_map(style_name: str, **kwargs: object) -> None:
+            try:
+                style.map(style_name, **kwargs)
+            except Exception:
+                logger.exception("Не вдалося налаштувати ttk map для %s", style_name)
+
+        safe_style_configure(
             style_name,
             background=bg,
             foreground=fg,
@@ -570,20 +610,20 @@ class SpecsWindow(ctk.CTkToplevel):
             rowheight=28,
             relief="flat",
         )
-        style.map(
+        safe_style_map(
             style_name,
             background=[("selected", select_bg)],
             foreground=[("selected", select_fg)],
         )
         heading_style = f"{style_name}.Heading"
-        style.configure(
+        safe_style_configure(
             heading_style,
             background=heading_bg,
             foreground=heading_fg,
-            bordercolor=border,
+            bordercolor=heading_border,
             relief="flat",
         )
-        style.map(heading_style, background=[("active", hover_bg)])
+        safe_style_map(heading_style, background=[("active", hover_bg)])
         return style_name, {
             "row_even": bg,
             "row_odd": alt_bg,
@@ -639,7 +679,13 @@ class SpecsWindow(ctk.CTkToplevel):
             return
         if self._rename_entry is not None:
             self._finish_inline_edit(save=False)
-        entry = create_inline_entry(self.tree, original)
+        theme_colors = None
+        master = getattr(self, "master", None)
+        if master is not None:
+            theme_manager = getattr(master, "theme_manager", None)
+            if theme_manager is not None:
+                theme_colors = getattr(theme_manager, "colors", None)
+        entry = create_inline_entry(self.tree, original, theme_colors=theme_colors)
         x, y, width, height = bbox
         entry.place(x=x, y=y, width=width, height=height)
         field = "key" if column == "#1" else "value"
@@ -1246,7 +1292,16 @@ class App(ctk.CTk):
         theme_fonts = self.theme_manager.fonts or {}
         base_bg = theme_colors.get("widget_fg", "#1b1d21")
         base_fg = theme_colors.get("text", "#f1f5f9")
+        border = theme_colors.get("border", base_bg)
         highlight = theme_colors.get("accent", "#1f6aa5")
+        header_bg = theme_colors.get("header_bg", highlight)
+        header_text = theme_colors.get("header_text", "#ffffff")
+        header_border = theme_colors.get("header_border", border)
+        selection_bg = theme_colors.get("selection_bg", highlight)
+        selection_text = theme_colors.get("selection_text", "#ffffff")
+        scrollbar_track = theme_colors.get("scrollbar_track", base_bg)
+        scrollbar_thumb = theme_colors.get("scrollbar_thumb", highlight)
+        scrollbar_thumb_hover = theme_colors.get("scrollbar_thumb_hover", scrollbar_thumb)
 
         family = str(theme_fonts.get("family", "Segoe UI"))
         body_size = int(theme_fonts.get("base_size", 13))
@@ -1260,38 +1315,58 @@ class App(ctk.CTk):
         body_size = body_font.cget("size")
         heading_size = heading_font.cget("size")
 
-        style.configure(
+        def safe_style_configure(style_name: str, **kwargs: object) -> None:
+            try:
+                style.configure(style_name, **kwargs)
+            except Exception:
+                logger.exception("Не вдалося налаштувати ttk стиль %s", style_name)
+
+        def safe_style_map(style_name: str, **kwargs: object) -> None:
+            try:
+                style.map(style_name, **kwargs)
+            except Exception:
+                logger.exception("Не вдалося налаштувати ttk map для %s", style_name)
+
+        def safe_style_layout(style_name: str, layout: list[tuple[str, dict]]) -> None:
+            try:
+                style.layout(style_name, layout)
+            except Exception:
+                logger.exception("Не вдалося налаштувати ttk layout для %s", style_name)
+
+        safe_style_configure(
             "Treeview",
             background=base_bg,
             fieldbackground=base_bg,
             foreground=base_fg,
             rowheight=26,
             font=(body_family, body_size),
-            bordercolor=base_bg,
+            bordercolor=border,
             borderwidth=0,
             relief="flat",
             padding=0,
         )
-        style.configure(
+        safe_style_configure(
             "Treeview.Heading",
-            background=highlight,
-            foreground="#ffffff",
+            background=header_bg,
+            foreground=header_text,
             font=(heading_family, heading_size, "bold"),
             relief="flat",
-            borderwidth=0,
+            borderwidth=1,
+            bordercolor=header_border,
             padding=(6, 4),
         )
-        style.map(
+        safe_style_map(
             "Treeview",
-            background=[("selected", highlight)],
-            foreground=[("selected", "#ffffff")],
+            background=[("selected", selection_bg)],
+            foreground=[("selected", selection_text)],
         )
-        style.map(
+        safe_style_map(
             "Treeview.Heading",
-            background=[("active", highlight)],
+            background=[("active", header_bg)],
+            foreground=[("active", header_text)],
             relief=[("active", "flat")],
         )
-        style.layout(
+        safe_style_layout(
             "Treeview",
             [
                 (
@@ -1301,6 +1376,45 @@ class App(ctk.CTk):
                     },
                 )
             ],
+        )
+        safe_style_configure(
+            "TScrollbar",
+            troughcolor=scrollbar_track,
+            background=scrollbar_thumb,
+            bordercolor=scrollbar_track,
+            arrowcolor=scrollbar_thumb,
+            lightcolor=scrollbar_thumb,
+            darkcolor=scrollbar_thumb,
+        )
+        safe_style_configure(
+            "Vertical.TScrollbar",
+            troughcolor=scrollbar_track,
+            background=scrollbar_thumb,
+            bordercolor=scrollbar_track,
+            arrowcolor=scrollbar_thumb,
+            lightcolor=scrollbar_thumb,
+            darkcolor=scrollbar_thumb,
+        )
+        safe_style_configure(
+            "Horizontal.TScrollbar",
+            troughcolor=scrollbar_track,
+            background=scrollbar_thumb,
+            bordercolor=scrollbar_track,
+            arrowcolor=scrollbar_thumb,
+            lightcolor=scrollbar_thumb,
+            darkcolor=scrollbar_thumb,
+        )
+        safe_style_map(
+            "TScrollbar",
+            background=[("active", scrollbar_thumb_hover), ("pressed", scrollbar_thumb_hover)],
+        )
+        safe_style_map(
+            "Vertical.TScrollbar",
+            background=[("active", scrollbar_thumb_hover), ("pressed", scrollbar_thumb_hover)],
+        )
+        safe_style_map(
+            "Horizontal.TScrollbar",
+            background=[("active", scrollbar_thumb_hover), ("pressed", scrollbar_thumb_hover)],
         )
 
     def _ensure_background_primitives(self) -> None:
