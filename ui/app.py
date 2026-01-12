@@ -1282,9 +1282,10 @@ class App(ctk.CTk):
         except Exception:
             current_theme = ""
 
-        if current_theme in {"", "default", "classic"}:
+        if current_theme.lower() != "clam":
             try:
                 style.theme_use("clam")
+                logger.info("Switched ttk theme from %s to clam", current_theme)
             except Exception:
                 pass
 
@@ -1302,6 +1303,12 @@ class App(ctk.CTk):
         scrollbar_track = theme_colors.get("scrollbar_track", base_bg)
         scrollbar_thumb = theme_colors.get("scrollbar_thumb", highlight)
         scrollbar_thumb_hover = theme_colors.get("scrollbar_thumb_hover", scrollbar_thumb)
+        logger.info(
+            "Applying ttk colors scrollbar_track=%s scrollbar_thumb=%s header_bg=%s",
+            scrollbar_track,
+            scrollbar_thumb,
+            header_bg,
+        )
 
         family = str(theme_fonts.get("family", "Segoe UI"))
         body_size = int(theme_fonts.get("base_size", 13))
