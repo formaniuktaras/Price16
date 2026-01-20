@@ -420,7 +420,7 @@ DEFAULT_EXPORT_FIELDS = [
     {"field": "Пошукові_запити_укр", "enabled": False, "template": "{{ tags }}"},
     {"field": "Опис", "enabled": True, "template": "{{ description }}"},
     {"field": "Опис_укр", "enabled": False, "template": "{{ description }}"},
-    {"field": "Код_товару", "enabled": False, "template": "{{ spec('Код_товару') }}"},
+    {"field": "Код_товару", "enabled": False, "template": "{{ clean_id(spec('Код_товару')) }}"},
     {"field": "Тип_товару", "enabled": False, "template": "{{ film_type }}"},
     {"field": "Ціна", "enabled": False, "template": ""},
     {"field": "Валюта", "enabled": False, "template": ""},
@@ -828,6 +828,7 @@ def save_export_fields(fields: list):
 _FORMULA_PREFIX_RE = re.compile(r"^\s*=")
 _IDENTIFIER_SANITIZE_RE = re.compile(r"[^\w]+", re.UNICODE)
 _ASCII_SANITIZE_RE = re.compile(r"[^0-9a-z]+")
+_CLEAN_ID_VALUE_RE = re.compile(r"[^A-Za-z0-9]+")
 
 _TRANSLIT_TABLE = {
     "а": "a",
@@ -923,6 +924,16 @@ def _transliterate_ascii(value: str) -> str:
     ascii_candidate = _ASCII_SANITIZE_RE.sub("_", ascii_candidate)
     ascii_candidate = re.sub(r"_+", "_", ascii_candidate).strip("_")
     return ascii_candidate
+
+
+def clean_id_value(value: object) -> str:
+    if value is None:
+        return ""
+    cleaned = str(value).strip()
+    if not cleaned:
+        return ""
+    cleaned = _CLEAN_ID_VALUE_RE.sub("", cleaned)
+    return cleaned.upper()
 
 
 def _build_formula_context(base_context):
@@ -1245,6 +1256,7 @@ def generate_export_rows(
             }
 
             context["relativedelta"] = _relativedelta_helper
+            context["clean_id"] = clean_id_value
 
             for code, value in title_values.items():
                 suffix = _language_key_suffix(code)
