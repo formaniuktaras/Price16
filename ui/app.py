@@ -30,6 +30,7 @@ from data_transfer import (
     export_all_data_to_excel,
     import_all_data_from_excel,
 )
+from identifiers import clean_id
 from templates_service import (
     APP_TITLE,
     DEPENDENCY_WARNINGS,
@@ -3940,7 +3941,7 @@ class App(ctk.CTk):
         for idx, field in enumerate(self.export_fields):
             name = str(field.get("field", "")).strip()
             languages = field.get("languages", [])
-            display_name = name
+            display_name = clean_id(name)
             codes = []
             if isinstance(languages, str):
                 lang_code = languages.strip()
@@ -3958,7 +3959,7 @@ class App(ctk.CTk):
                     seen_langs.add(code)
             if codes:
                 labels = [self._language_label_for_code(code) for code in codes]
-                display_name = f"{name} ({', '.join(labels)})"
+                display_name = f"{display_name} ({', '.join(labels)})"
             status = "Так" if field.get("enabled") else "Ні"
             tree.insert("", "end", iid=f"exp_{idx}", values=(display_name, status))
         if select_index is not None and 0 <= select_index < len(self.export_fields):
