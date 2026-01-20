@@ -13,7 +13,18 @@ class FieldItem:
     enabled: bool
 
 
+
 def sanitize_key(raw: str) -> str:
+    if raw is None:
+        raw_value = ""
+    else:
+        raw_value = str(raw)
+    trimmed = raw_value.strip()
+    cleaned = _ALLOWED_RE.sub("", trimmed).upper()
+    return cleaned or "ID"
+
+
+def clean_id(raw: str, max_len: int = 32) -> str:
     if raw is None:
         raw_value = ""
     else:
@@ -53,5 +64,5 @@ def ensure_unique_key(key: str, existing: Set[str]) -> str:
         counter += 1
 
 
-def make_unique_id(candidate: str, existing: Set[str]) -> str:
-    return ensure_unique_key(candidate, existing)
+def ensure_unique_key(key: str, existing: Set[str]) -> str:
+    return make_unique_id(key, existing)

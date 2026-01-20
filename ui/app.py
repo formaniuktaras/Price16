@@ -30,7 +30,7 @@ from data_transfer import (
     export_all_data_to_excel,
     import_all_data_from_excel,
 )
-from identifiers import FieldItem, ensure_unique_key, sanitize_key
+from identifiers import clean_id, sanitize_key, ensure_unique_key
 from templates_service import (
     APP_TITLE,
     DEPENDENCY_WARNINGS,
@@ -3945,25 +3945,43 @@ class App(ctk.CTk):
         tree.delete(*tree.get_children())
         self._export_iid_to_key = {}
         self._export_key_to_iid = {}
-        self._export_iid_to_index = {}
-        self._export_index_to_iid = []
         used_iids = set()
         for idx, field in enumerate(self.export_fields):
             name = str(field.get("field", "")).strip()
-            item = FieldItem(key=name, label=name, enabled=bool(field.get("enabled")))
-            candidate_iid = sanitize_key(item.key)
-            iid = ensure_unique_key(candidate_iid, used_iids)
+            languages = field.get("languages", [])
+            display_name = name
+            codes = []
+            if isinstance(languages, str):
+                lang_code = languages.strip()
+                if lang_code:
+                    codes.append(lang_code)
+            elif isinstance(languages, (list, tuple, set)):
+                seen_langs = set()
+                for lang in languages:
+                    if not isinstance(lang, str):
+                        continue
+                    code = lang.strip()
+                    if not code or code in seen_langs:
+                        continue
+                    codes.append(code)
+                    seen_langs.add(code)
+            if codes:
+                labels = [self._language_label_for_code(code) for code in codes]
+                display_name = f"{display_name} ({', '.join(labels)})"
+            status = "Так" if field.get("enabled") else "Ні"
+            base_iid = sanitize_key(name)
+            iid = ensure_unique_key(base_iid, used_iids)
             used_iids.add(iid)
-            self._export_iid_to_key[iid] = item.key
-            self._export_key_to_iid.setdefault(item.key, iid)
-            self._export_iid_to_index[iid] = idx
-            self._export_index_to_iid.append(iid)
-            status = "Так" if item.enabled else "Ні"
-            tree.insert("", "end", iid=iid, values=(item.label, status))
-        if select_index is not None and 0 <= select_index < len(self._export_index_to_iid):
-            iid = self._export_index_to_iid[select_index]
-            tree.selection_set(iid)
-            tree.focus(iid)
+            self._export_iid_to_key[iid] = name
+            if name:
+                self._export_key_to_iid[name] = iid
+            tree.insert("", "end", iid=iid, values=(display_name, status))
+        if select_index is not None and 0 <= select_index < len(self.export_fields):
+            selected_name = str(self.export_fields[select_index].get("field", "")).strip()
+            iid = self._export_key_to_iid.get(selected_name)
+            if iid and tree.exists(iid):
+                tree.selection_set(iid)
+                tree.focus(iid)
         self._export_tree_updating = False
 
     def _find_export_field_index(self, raw_key: str):
@@ -4097,7 +4115,12 @@ class App(ctk.CTk):
             return
         iid = selection[0]
         raw_key = getattr(self, "_export_iid_to_key", {}).get(iid)
-        idx = self._find_export_field_index(raw_key) if raw_key else None
+        idx = None
+        if raw_key is not None:
+            for index, field in enumerate(self.export_fields):
+                if str(field.get("field", "")).strip() == raw_key:
+                    idx = index
+                    break
         self._export_apply_detail(False)
         if idx is None:
             self._load_export_field_detail(None)
