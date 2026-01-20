@@ -1247,12 +1247,6 @@ class App(ctk.CTk):
         self.out_folder_entry = None
         self.file_menu_button = None
         self._file_menu = None
-        self._film_type_vars: Dict[str, tk.BooleanVar] = {}
-        self._film_type_cbs: Dict[str, ctk.CTkCheckBox] = {}
-        self._film_type_order: List[str] = []
-        self._film_types_cols = None
-        self._film_types_scroll = None
-        self._film_layout_job = None
         # Compatibility: some flows expect the filmtype name variable to exist during tab
         # construction even if the dedicated film type tab is hidden. Older widgets access
         # the variable through the low-level Tk interpreter (self.tk), so expose it there
@@ -4497,12 +4491,8 @@ class App(ctk.CTk):
         types_frame = ctk.CTkFrame(right)
         types_frame.pack(fill="both", expand=True, padx=10, pady=(4, 6))
         ctk.CTkLabel(types_frame, text="Типи плівок:").pack(anchor="w", padx=6, pady=(4, 2))
-        types_wrap = ctk.CTkFrame(types_frame)
-        types_wrap.pack(fill="x", padx=6, pady=(2, 6))
-        types_scroll = ctk.CTkScrollableFrame(types_wrap, height=160)
-        types_scroll.pack(fill="both", expand=True, padx=8, pady=8)
-        types_scroll.bind("<Configure>", self._on_film_types_resize)
-        self._film_types_scroll = types_scroll
+        self.filmtype_frame = ctk.CTkFrame(types_frame, fg_color="transparent")
+        self.filmtype_frame.pack(fill="x", padx=6, pady=(2, 6))
         self.ft_vars = []
 
         action_row = ctk.CTkFrame(right)
@@ -5068,13 +5058,14 @@ class App(ctk.CTk):
             except Exception:
                 pass
 
-    def _compute_film_type_cols(self, width_px: int) -> int:
-        col_w = 240
-        cols = max(1, width_px // col_w)
-        return min(cols, 6)
-
-    def _build_film_type_checkboxes(self, parent, film_types: List[Dict[str, object]]) -> None:
-        self._film_type_order = []
+    def _refresh_filmtype_checkboxes(self):
+        frame = getattr(self, "filmtype_frame", None)
+        if frame is None:
+            return
+        for widget in frame.winfo_children():
+            widget.destroy()
+        self.ft_vars.clear()
+        film_types = self.templates.get("film_types", []) if isinstance(self.templates, dict) else []
         for item in film_types:
             if not isinstance(item, dict):
                 continue
@@ -5082,70 +5073,10 @@ class App(ctk.CTk):
             if not isinstance(name, str) or not name.strip():
                 continue
             normalized_name = name.strip()
-            self._film_type_order.append(normalized_name)
-            var = self._film_type_vars.get(normalized_name)
-            enabled = bool(item.get("enabled", True))
-            if var is None:
-                var = tk.BooleanVar(value=enabled)
-                self._film_type_vars[normalized_name] = var
-            else:
-                var.set(enabled)
-            if normalized_name not in self._film_type_cbs:
-                checkbox = ctk.CTkCheckBox(parent, text=normalized_name, variable=var)
-                self._film_type_cbs[normalized_name] = checkbox
-
-        for name in list(self._film_type_cbs.keys()):
-            if name not in self._film_type_order:
-                widget = self._film_type_cbs.pop(name)
-                widget.destroy()
-                self._film_type_vars.pop(name, None)
-
-        self.ft_vars = [
-            {"name": name, "var": self._film_type_vars[name], "widget": self._film_type_cbs[name]}
-            for name in self._film_type_order
-        ]
-
-    def _relayout_film_types(self) -> None:
-        parent = self._film_types_scroll
-        if parent is None:
-            return
-        width = parent.winfo_width()
-        if width < 50:
-            return
-        cols = self._compute_film_type_cols(width)
-        if cols == self._film_types_cols:
-            return
-        self._film_types_cols = cols
-        for cb in self._film_type_cbs.values():
-            cb.grid_forget()
-        for c in range(cols):
-            parent.grid_columnconfigure(c, weight=1)
-        for i, name in enumerate(self._film_type_order):
-            cb = self._film_type_cbs.get(name)
-            if cb is None:
-                continue
-            r = i // cols
-            c = i % cols
-            cb.grid(row=r, column=c, sticky="w", padx=10, pady=6)
-
-    def _schedule_film_types_relayout(self) -> None:
-        if self._film_layout_job:
-            try:
-                self.after_cancel(self._film_layout_job)
-            except Exception:
-                pass
-        self._film_layout_job = self.after(80, self._relayout_film_types)
-
-    def _on_film_types_resize(self, _event=None) -> None:
-        self._schedule_film_types_relayout()
-
-    def _refresh_filmtype_checkboxes(self):
-        frame = self._film_types_scroll
-        if frame is None:
-            return
-        film_types = self.templates.get("film_types", []) if isinstance(self.templates, dict) else []
-        self._build_film_type_checkboxes(frame, film_types)
-        self._schedule_film_types_relayout()
+            var = tk.BooleanVar(value=bool(item.get("enabled", True)))
+            checkbox = ctk.CTkCheckBox(frame, text=normalized_name, variable=var)
+            checkbox.pack(side="left", padx=6, pady=2)
+            self.ft_vars.append({"name": normalized_name, "var": var, "widget": checkbox})
         self._refresh_template_selectors()
 
     def _choose_folder(self):
