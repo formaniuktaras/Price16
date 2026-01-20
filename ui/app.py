@@ -30,7 +30,7 @@ from data_transfer import (
     export_all_data_to_excel,
     import_all_data_from_excel,
 )
-from identifiers import clean_id
+from identifiers import clean_id, sanitize_key, ensure_unique_key
 from templates_service import (
     APP_TITLE,
     DEPENDENCY_WARNINGS,
@@ -3932,10 +3932,13 @@ class App(ctk.CTk):
             return
         self._export_tree_updating = True
         tree.delete(*tree.get_children())
+        self._export_iid_to_key = {}
+        self._export_key_to_iid = {}
+        used_iids = set()
         for idx, field in enumerate(self.export_fields):
             name = str(field.get("field", "")).strip()
             languages = field.get("languages", [])
-            display_name = clean_id(name)
+            display_name = name
             codes = []
             if isinstance(languages, str):
                 lang_code = languages.strip()
@@ -3955,11 +3958,19 @@ class App(ctk.CTk):
                 labels = [self._language_label_for_code(code) for code in codes]
                 display_name = f"{display_name} ({', '.join(labels)})"
             status = "Так" if field.get("enabled") else "Ні"
-            tree.insert("", "end", iid=f"exp_{idx}", values=(display_name, status))
+            base_iid = sanitize_key(name)
+            iid = ensure_unique_key(base_iid, used_iids)
+            used_iids.add(iid)
+            self._export_iid_to_key[iid] = name
+            if name:
+                self._export_key_to_iid[name] = iid
+            tree.insert("", "end", iid=iid, values=(display_name, status))
         if select_index is not None and 0 <= select_index < len(self.export_fields):
-            iid = f"exp_{select_index}"
-            tree.selection_set(iid)
-            tree.focus(iid)
+            selected_name = str(self.export_fields[select_index].get("field", "")).strip()
+            iid = self._export_key_to_iid.get(selected_name)
+            if iid and tree.exists(iid):
+                tree.selection_set(iid)
+                tree.focus(iid)
         self._export_tree_updating = False
 
     def _set_export_detail_state(self, enabled: bool):
@@ -4071,10 +4082,13 @@ class App(ctk.CTk):
             self._load_export_field_detail(None)
             return
         iid = selection[0]
-        try:
-            idx = int(iid.split("_", 1)[1])
-        except (IndexError, ValueError):
-            idx = None
+        raw_key = getattr(self, "_export_iid_to_key", {}).get(iid)
+        idx = None
+        if raw_key is not None:
+            for index, field in enumerate(self.export_fields):
+                if str(field.get("field", "")).strip() == raw_key:
+                    idx = index
+                    break
         self._export_apply_detail(False)
         if idx is None:
             self._load_export_field_detail(None)

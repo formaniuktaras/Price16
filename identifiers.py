@@ -59,6 +59,16 @@ def _transliterate_ascii(value: str) -> str:
     return "".join(result)
 
 
+def sanitize_key(raw: str) -> str:
+    if raw is None:
+        raw_value = ""
+    else:
+        raw_value = str(raw)
+    trimmed = raw_value.strip()
+    cleaned = _ALLOWED_RE.sub("", trimmed).upper()
+    return cleaned or "ID"
+
+
 def clean_id(raw: str, max_len: int = 32) -> str:
     if raw is None:
         raw_value = ""
@@ -97,3 +107,7 @@ def make_unique_id(candidate: str, existing: Set[str]) -> str:
         if proposed not in existing:
             return proposed
         counter += 1
+
+
+def ensure_unique_key(key: str, existing: Set[str]) -> str:
+    return make_unique_id(key, existing)
