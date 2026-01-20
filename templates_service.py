@@ -14,7 +14,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from app_paths import get_config_path
 from errors import MissingDependencyError
 from formula_engine import FormulaEngine, FormulaError
-from identifiers import clean_id, make_unique_id
+from identifiers import ensure_unique_key, sanitize_key
 
 from database import collect_models, load_specs_map
 
@@ -1357,8 +1357,8 @@ def _make_unique_column_keys(columns):
     unique_keys = []
     existing = set()
     for name in columns:
-        candidate = clean_id(str(name))
-        unique = make_unique_id(candidate, existing)
+        candidate = sanitize_key(str(name))
+        unique = ensure_unique_key(candidate, existing)
         existing.add(unique)
         unique_keys.append(unique)
     return unique_keys
