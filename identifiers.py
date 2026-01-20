@@ -3,7 +3,7 @@ import re
 from dataclasses import dataclass
 from typing import Set
 
-_DISALLOWED_KEY_RE = re.compile(r"[^A-Z0-9_]+")
+_DISALLOWED_KEY_RE = re.compile(r"[^A-Z0-9]+")
 
 
 @dataclass(frozen=True)
@@ -20,16 +20,7 @@ def sanitize_key(raw: str) -> str:
     else:
         raw_value = str(raw)
     trimmed = raw_value.strip()
-    cleaned = _ALLOWED_RE.sub("", trimmed).upper()
-    return cleaned or "ID"
-
-
-def clean_id(raw: str, max_len: int = 32) -> str:
-    if raw is None:
-        raw_value = ""
-    else:
-        raw_value = str(raw)
-    cleaned = _DISALLOWED_KEY_RE.sub("", raw_value.strip().upper())
+    cleaned = _DISALLOWED_KEY_RE.sub("", trimmed.upper())
     return cleaned or "ID"
 
 
@@ -52,8 +43,8 @@ def clean_id(raw: str, max_len: int = 32) -> str:
     return cleaned
 
 
-def ensure_unique_key(key: str, existing: Set[str]) -> str:
-    base = str(key)
+def make_unique_id(candidate: str, existing: Set[str]) -> str:
+    base = str(candidate)
     if base not in existing:
         return base
     counter = 2
