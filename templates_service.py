@@ -14,6 +14,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from app_paths import get_config_path
 from errors import MissingDependencyError
 from formula_engine import FormulaEngine, FormulaError
+from identifiers import clean_id, make_unique_id
 
 from database import collect_models, load_specs_map
 
@@ -1336,7 +1337,7 @@ def generate_export_rows(
             if progress_callback is not None:
                 progress_callback(progress_count, total_steps)
 
-    return rows, column_order
+    return rows, _make_unique_column_keys(column_order)
 
 
 def _row_to_values(record, columns):
@@ -1353,15 +1354,13 @@ def _row_to_values(record, columns):
 
 
 def _make_unique_column_keys(columns):
-    counts = {}
     unique_keys = []
+    existing = set()
     for name in columns:
-        count = counts.get(name, 0) + 1
-        counts[name] = count
-        if count == 1:
-            unique_keys.append(name)
-        else:
-            unique_keys.append(f"{name}__{count}")
+        candidate = clean_id(str(name))
+        unique = make_unique_id(candidate, existing)
+        existing.add(unique)
+        unique_keys.append(unique)
     return unique_keys
 
 
