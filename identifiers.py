@@ -1,75 +1,29 @@
 import hashlib
 import re
+from dataclasses import dataclass
 from typing import Set
 
-_TRANSLIT_TABLE = {
-    "а": "a",
-    "б": "b",
-    "в": "v",
-    "г": "h",
-    "ґ": "g",
-    "д": "d",
-    "е": "e",
-    "є": "ie",
-    "ж": "zh",
-    "з": "z",
-    "и": "y",
-    "і": "i",
-    "ї": "yi",
-    "й": "y",
-    "к": "k",
-    "л": "l",
-    "м": "m",
-    "н": "n",
-    "о": "o",
-    "п": "p",
-    "р": "r",
-    "с": "s",
-    "т": "t",
-    "у": "u",
-    "ф": "f",
-    "х": "kh",
-    "ц": "ts",
-    "ч": "ch",
-    "ш": "sh",
-    "щ": "shch",
-    "ь": "",
-    "ю": "yu",
-    "я": "ya",
-    "ъ": "",
-    "ы": "y",
-    "э": "e",
-    "ё": "yo",
-}
-
-_ALLOWED_RE = re.compile(r"[^0-9A-Za-z]+")
+_DISALLOWED_KEY_RE = re.compile(r"[^A-Z0-9_]+")
 
 
-def _transliterate_ascii(value: str) -> str:
-    result = []
-    for ch in value:
-        lower = ch.lower()
-        if "a" <= lower <= "z" or lower.isdigit():
-            result.append(lower)
-            continue
-        if lower in _TRANSLIT_TABLE:
-            result.append(_TRANSLIT_TABLE[lower])
-            continue
-        result.append("")
-    return "".join(result)
+@dataclass(frozen=True)
+class FieldItem:
+    key: str
+    label: str
+    enabled: bool
 
 
-def clean_id(raw: str, max_len: int = 32) -> str:
+def sanitize_key(raw: str) -> str:
     if raw is None:
         raw_value = ""
     else:
         raw_value = str(raw)
-    trimmed = raw_value.strip()
-    transliterated = _transliterate_ascii(trimmed) if trimmed else ""
-    cleaned = _ALLOWED_RE.sub("", transliterated).upper()
-    if not cleaned:
-        cleaned = "ID"
+    cleaned = _DISALLOWED_KEY_RE.sub("", raw_value.strip().upper())
+    return cleaned or "ID"
 
+
+def clean_id(raw: str, max_len: int = 32) -> str:
+    cleaned = sanitize_key(raw)
     try:
         max_len = int(max_len)
     except (TypeError, ValueError):
@@ -79,7 +33,7 @@ def clean_id(raw: str, max_len: int = 32) -> str:
         return ""
 
     if len(cleaned) > max_len:
-        suffix = hashlib.sha1(raw_value.encode("utf-8")).hexdigest()[:6].upper()
+        suffix = hashlib.sha1(str(raw).encode("utf-8")).hexdigest()[:6].upper()
         if max_len <= len(suffix):
             return suffix[:max_len]
         prefix = cleaned[: max_len - len(suffix)]
@@ -87,8 +41,8 @@ def clean_id(raw: str, max_len: int = 32) -> str:
     return cleaned
 
 
-def make_unique_id(candidate: str, existing: Set[str]) -> str:
-    base = str(candidate)
+def ensure_unique_key(key: str, existing: Set[str]) -> str:
+    base = str(key)
     if base not in existing:
         return base
     counter = 2
@@ -97,3 +51,7 @@ def make_unique_id(candidate: str, existing: Set[str]) -> str:
         if proposed not in existing:
             return proposed
         counter += 1
+
+
+def make_unique_id(candidate: str, existing: Set[str]) -> str:
+    return ensure_unique_key(candidate, existing)

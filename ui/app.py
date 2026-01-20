@@ -30,7 +30,7 @@ from data_transfer import (
     export_all_data_to_excel,
     import_all_data_from_excel,
 )
-from identifiers import clean_id
+from identifiers import FieldItem, ensure_unique_key, sanitize_key
 from templates_service import (
     APP_TITLE,
     DEPENDENCY_WARNINGS,
@@ -1229,8 +1229,13 @@ class App(ctk.CTk):
         self._rename_delay_min = 0.35
         self._rename_delay_max = 4.0
         self._export_selected_index = None
+        self._export_selected_key = None
         self._export_tree_updating = False
         self._export_unknown_language_codes = []
+        self._export_iid_to_key = {}
+        self._export_key_to_iid = {}
+        self._export_iid_to_index = {}
+        self._export_index_to_iid = []
         self.export_language_vars = []
         self.progress_bar = None
         self.progress_label = None
@@ -3513,7 +3518,7 @@ class App(ctk.CTk):
     def _refresh_export_language_controls(self):
         self._build_export_field_language_checkboxes()
         self._build_generate_language_checkboxes()
-        selected_index = getattr(self, "_export_selected_index", None)
+        selected_index = self._get_export_selected_index()
         if selected_index is not None:
             self._load_export_field_detail(selected_index)
 
@@ -3932,35 +3937,47 @@ class App(ctk.CTk):
             return
         self._export_tree_updating = True
         tree.delete(*tree.get_children())
+        self._export_iid_to_key = {}
+        self._export_key_to_iid = {}
+        self._export_iid_to_index = {}
+        self._export_index_to_iid = []
+        used_iids = set()
         for idx, field in enumerate(self.export_fields):
             name = str(field.get("field", "")).strip()
-            languages = field.get("languages", [])
-            display_name = clean_id(name)
-            codes = []
-            if isinstance(languages, str):
-                lang_code = languages.strip()
-                if lang_code:
-                    codes.append(lang_code)
-            elif isinstance(languages, (list, tuple, set)):
-                seen_langs = set()
-                for lang in languages:
-                    if not isinstance(lang, str):
-                        continue
-                    code = lang.strip()
-                    if not code or code in seen_langs:
-                        continue
-                    codes.append(code)
-                    seen_langs.add(code)
-            if codes:
-                labels = [self._language_label_for_code(code) for code in codes]
-                display_name = f"{display_name} ({', '.join(labels)})"
-            status = "Так" if field.get("enabled") else "Ні"
-            tree.insert("", "end", iid=f"exp_{idx}", values=(display_name, status))
-        if select_index is not None and 0 <= select_index < len(self.export_fields):
-            iid = f"exp_{select_index}"
+            item = FieldItem(key=name, label=name, enabled=bool(field.get("enabled")))
+            candidate_iid = sanitize_key(item.key)
+            iid = ensure_unique_key(candidate_iid, used_iids)
+            used_iids.add(iid)
+            self._export_iid_to_key[iid] = item.key
+            self._export_key_to_iid.setdefault(item.key, iid)
+            self._export_iid_to_index[iid] = idx
+            self._export_index_to_iid.append(iid)
+            status = "Так" if item.enabled else "Ні"
+            tree.insert("", "end", iid=iid, values=(item.label, status))
+        if select_index is not None and 0 <= select_index < len(self._export_index_to_iid):
+            iid = self._export_index_to_iid[select_index]
             tree.selection_set(iid)
             tree.focus(iid)
         self._export_tree_updating = False
+
+    def _find_export_field_index(self, raw_key: str):
+        if not raw_key:
+            return None
+        for idx, field in enumerate(self.export_fields):
+            if field.get("field") == raw_key:
+                return idx
+        return None
+
+    def _get_export_selected_index(self):
+        selected_key = getattr(self, "_export_selected_key", None)
+        if isinstance(selected_key, str):
+            idx = self._find_export_field_index(selected_key)
+            if idx is not None:
+                return idx
+        idx = getattr(self, "_export_selected_index", None)
+        if idx is None or idx < 0 or idx >= len(self.export_fields):
+            return None
+        return idx
 
     def _set_export_detail_state(self, enabled: bool):
         state = tk.NORMAL if enabled else tk.DISABLED
@@ -3980,6 +3997,7 @@ class App(ctk.CTk):
     def _load_export_field_detail(self, index):
         if index is None or index < 0 or index >= len(self.export_fields):
             self._export_selected_index = None
+            self._export_selected_key = None
             self._set_export_detail_state(False)
             if hasattr(self, "export_field_name_var"):
                 self.export_field_name_var.set("")
@@ -4005,6 +4023,7 @@ class App(ctk.CTk):
 
         self._export_selected_index = index
         field = self.export_fields[index]
+        self._export_selected_key = field.get("field")
         name = str(field.get("field", ""))
         template = field.get("template", "")
         if template is None:
@@ -4071,10 +4090,8 @@ class App(ctk.CTk):
             self._load_export_field_detail(None)
             return
         iid = selection[0]
-        try:
-            idx = int(iid.split("_", 1)[1])
-        except (IndexError, ValueError):
-            idx = None
+        raw_key = getattr(self, "_export_iid_to_key", {}).get(iid)
+        idx = self._find_export_field_index(raw_key) if raw_key else None
         self._export_apply_detail(False)
         if idx is None:
             self._load_export_field_detail(None)
@@ -4140,8 +4157,8 @@ class App(ctk.CTk):
         )
 
     def _export_apply_detail(self, save_to_file: bool):
-        idx = getattr(self, "_export_selected_index", None)
-        if idx is None or idx < 0 or idx >= len(self.export_fields):
+        idx = self._get_export_selected_index()
+        if idx is None:
             return False
         field = self.export_fields[idx]
         name = self.export_field_name_var.get().strip()
@@ -4189,6 +4206,7 @@ class App(ctk.CTk):
         changed = False
         if field.get("field") != name:
             field["field"] = name
+            self._export_selected_key = name
             changed = True
         if field.get("template", "") != template:
             field["template"] = template
@@ -4243,8 +4261,8 @@ class App(ctk.CTk):
         self._load_export_field_detail(idx)
 
     def _export_delete_field(self):
-        idx = getattr(self, "_export_selected_index", None)
-        if idx is None or idx < 0 or idx >= len(self.export_fields):
+        idx = self._get_export_selected_index()
+        if idx is None:
             show_error("Оберіть поле для видалення.")
             return
         if not messagebox.askyesno("Підтвердження", "Видалити вибране поле?"):
@@ -4259,7 +4277,7 @@ class App(ctk.CTk):
             self._load_export_field_detail(None)
 
     def _export_move_field(self, direction: int):
-        idx = getattr(self, "_export_selected_index", None)
+        idx = self._get_export_selected_index()
         if idx is None:
             return
         new_idx = idx + direction
